@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FastAPI + Puter.js Test</title>
+    <script src="https://js.puter.com/v2/"></script>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+        .output { background: #f4f4f4; padding: 15px; margin: 10px 0; border-radius: 5px; white-space: pre-wrap; }
+        .success { color: green; }
+        .error { color: red; }
+        h1 { color: #333; }
+    </style>
+</head>
+<body>
+    <h1>FastAPI + Puter.js Connection Test</h1>
+    
+    <h2>1. Test Backend Connection</h2>
+    <button onclick="testConnection()">Test FastAPI Connection</button>
+    <div id="connectionResult" class="output"></div>
+    
+    <h2>2. Get Data from Backend</h2>
+    <button onclick="getData()">Fetch Data</button>
+    <div id="dataResult" class="output"></div>
+    
+    <h2>3. Run AI Pipeline with Puter.js</h2>
+    <button onclick="runPipeline()">Run Full Pipeline</button>
+    <div id="pipelineResult" class="output"></div>
+
+    <script>
+        const API_URL = "http://localhost:8000";
+
+        async function testConnection() {
+            const resultDiv = document.getElementById("connectionResult");
+            resultDiv.innerHTML = "Testing...";
+            try {
+                const res = await fetch(`${API_URL}/test`);
+                const data = await res.json();
+                resultDiv.innerHTML = `<span class="success">✓ Connected!</span>\n${JSON.stringify(data, null, 2)}`;
+            } catch (err) {
+                resultDiv.innerHTML = `<span class="error">✗ Error: ${err.message}</span>`;
+            }
+        }
+
+        async function getData() {
+            const resultDiv = document.getElementById("dataResult");
+            resultDiv.innerHTML = "Fetching...";
+            try {
+                const res = await fetch(`${API_URL}/data`);
+                const data = await res.json();
+                resultDiv.innerHTML = `<span class="success">✓ Data received:</span>\n${JSON.stringify(data, null, 2)}`;
+            } catch (err) {
+                resultDiv.innerHTML = `<span class="error">✗ Error: ${err.message}</span>`;
+            }
+        }
+
+        async function runPipeline() {
+            const resultDiv = document.getElementById("pipelineResult");
+            resultDiv.innerHTML = "Running pipeline...\n";
+            
+            try {
+                // 1. Get scraped data from backend
+                resultDiv.innerHTML += "\n1. Fetching data from backend...";
+                const dataRes = await fetch(`${API_URL}/data`);
+                const { text } = await dataRes.json();
+                resultDiv.innerHTML += `\n   ✓ Got text: "${text.substring(0, 50)}..."`;
+
+                // 2. Run Puter AI
+                resultDiv.innerHTML += "\n\n2. Sending to Puter.js AI...";
+                
+                let output;
+                try {
+                    const prompt = 
+                    `
+                    Extract all question-like requests from the input text and return only JSON in this exact shape:
+
+                    {"questions":["...","..."]}
+
+                    Definition: A “question” is any sentence or line that asks the reader to do something or provide information, including imperatives like
+                    “discuss…”, “explain…”, “describe…”, “analyze…”, “compare…”, “summarize…”, etc., even if it does not end with ?.
+                    DO NOT include questions that are merely instructions e.g. Answer three questions in total, of which one must be from Section A, one from Section B and one from either Section A or Section B. OR Begin each essay question on a fresh piece of paper, and staple your papers together according to the essay question your answer addresses.
+                    Rules:
+
+                    - Preserve original wording and punctuation.
+                    - Keep original order.
+                    - If none, return {"questions":[]}.
+                    - Output JSON only, no extra text.
+                    Text: 
+                    `+
+                    text;
+                    const aiResponse = await puter.ai.chat(prompt, {
+                        model: "gpt-5-nano"
+                    });
+                    
+                    // Handle different response formats
+                    if (typeof aiResponse === 'string') {
+                        output = aiResponse;
+                    } else if (aiResponse?.message?.content) {
+                        output = aiResponse.message.content;
+                    } else if (aiResponse?.content) {
+                        output = aiResponse.content;
+                    } else {
+                        output = JSON.stringify(aiResponse);
+                    }
+                } catch (aiErr) {
+                    resultDiv.innerHTML += `\n Error: ${aiErr.message || aiErr}`;
+                    console.error("Puter AI error:", aiErr);
+                    return;
+                }
+
+                resultDiv.innerHTML += `\n  Response "${output}"`;
+
+                // 3. Send result back to backend
+                resultDiv.innerHTML += "\n\n3. Sending AI result to backend...";
+                const postRes = await fetch(`${API_URL}/ai-result`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ result: output })
+                });
+                const postData = await postRes.json();
+                resultDiv.innerHTML += `\n   ✓ Backend response: ${JSON.stringify(postData)}`;
+
+                resultDiv.innerHTML += `\n\n<span class="success">✓ Pipeline completed successfully!</span>`;
+            } catch (err) {
+                resultDiv.innerHTML += `\n\n<span class="error">✗ Pipeline error: ${err.message || err}</span>`;
+                console.error("Pipeline error:", err);
+            }
+        }
+    </script>
+</body>
+</html>
