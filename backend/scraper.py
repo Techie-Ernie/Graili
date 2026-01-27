@@ -14,11 +14,17 @@ class HolyGrailScraper:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=False)
             page = await browser.new_page()
-            await page.goto(f"https://grail.moe/library", timeout=60000)
-            
-            # apply filters 
-            filters = [self.category, self.subject, self.year, self.documentType]
-            
+            params = [
+                ("category", self.category),
+                ("subject", self.subject),
+                ("year", self.year),
+                ("doc_type", self.documentType)
+            ]
+            query = "&".join(f"{k}={v.replace(' ', '+')}" for k, v in params if v)
+            link = f"https://grail.moe/library?{query}"            
+            await page.goto(link, timeout=60000)
+
+            """
             for i, option_name in enumerate(filters):
                 if option_name:  
                     input_box = page.locator('input[role="combobox"]').nth(i)
@@ -29,7 +35,7 @@ class HolyGrailScraper:
                     await input_box.wait_for(state="visible") # it somehow only selects second field correctly with this line but if it works it works
                     await asyncio.sleep(0.5)
                     # should probably add additional checks that all filters have been applied correctly -- doesnt work sometimes 
-
+            """
             documents = {}
             for i in range(1,self.pages+1):  # get links for each page 
             
