@@ -74,24 +74,68 @@
                 try {
                     const prompt = 
                     `
-                    Extract all question-like requests from the input text and return only JSON in this exact shape:
+                    You are an information extraction engine. You MUST NOT generate any content that is not present verbatim in the input.
 
-                    {"questions":["...","..."]}
+                    TASK
+                    Extract ONLY the actual exam sub-questions from the given paper text (ignore instructions, headers, source lines, extracts, figures, totals, and any non-question content). Classify each extracted sub-question into:
+                    - "exam": sub-questions that have an explicit mark allocation in square brackets, attached per rules below
+                    - "understanding": sub-questions that do NOT have an explicit mark allocation attached per rules below
 
-                    Definition: A “question” is any sentence or line that asks the reader to do something or provide information, including imperatives like
-                    “discuss…”, “explain…”, “describe…”, “analyze…”, “compare…”, “summarize…”, etc., even if it does not end with ?.
-                    DO NOT include questions that are merely instructions e.g. Answer three questions in total, of which one must be from Section A, one from Section B and one from either Section A or Section B. OR Begin each essay question on a fresh piece of paper, and staple your papers together according to the essay question your answer addresses.
-                    Rules:
+                    CRITICAL: NO HALLUCINATIONS
+                    - Output ONLY questions that appear verbatim in the input text.
+                    - DO NOT paraphrase, summarize, or invent any questions.
+                    - DO NOT create “understanding” questions unless they are verbatim in the input.
+                    - If there are no understanding questions, "understanding" MUST be [].
 
-                    - Preserve original wording and punctuation.
-                    - Keep original order.
-                    - If none, return {"questions":[]}.
-                    - Output JSON only, no extra text.
-                    Text: 
+                    DEFINITION OF QUESTION
+                    A “question” is a line/block that asks the candidate to do something (e.g., Explain/Discuss/Describe/Analyse/Compare/Evaluate/With reference to..., etc.), including subparts like (a), (b), (c)(i), (ii), etc.
+
+                    EXCLUSIONS (NOT QUESTIONS)
+                    Do NOT extract:
+                    - General instructions (e.g., “Answer all questions”, “You are required to answer…”)
+                    - Section instructions (e.g., “One or two of your three chosen questions…”)
+                    - Totals lines like “[Total: 30]”
+                    - Any bracketed text that is NOT a mark allocation (e.g., quotes like “free trade [but] ...”)
+                    - Source citations and headers
+
+                    MARK ASSOCIATION RULE (STRICT + MECHANICAL)
+                    A sub-question has marks ONLY if there is a square-bracketed integer mark like [2], [4], [8], [10], [15] that is:
+                    1) On the same line as the sub-question, OR
+                    2) On the immediately following NON-EMPTY line (after trimming whitespace).
+
+                    A square-bracketed value is NOT a mark allocation if it matches:
+                    - [Total: ...] (case-insensitive)
+                    - any bracketed word/phrase containing letters (e.g., [but], [Total], [Source])
+                    Only pure integers inside brackets count as marks: [number]
+
+                    If a pure-integer mark is found by rule (1) or (2), append it to the end of the question text separated by a single space, exactly as written (e.g., "... [10]").
+                    If no such mark is attached, DO NOT add any brackets.
+
+                    THEME MAPPING
+                    For each extracted sub-question, set "theme" to the most specific matching theme/subtheme from the provided syllabus. If syllabus mapping is uncertain, set theme to "Unknown" (do NOT guess).
+
+                    OUTPUT FORMAT (STRICT JSON ONLY)
+                    Return JSON ONLY in this exact structure:
+                    {
+                    "exam": [
+                        { "theme": "<theme>", "question": "<verbatim question text with attached mark if present>" }
+                    ],
+                    "understanding": [
+                        { "theme": "<theme>", "question": "<verbatim question text with NO marks>" }
+                    ]
+                    }
+
+                    FINAL VALIDATION (MANDATORY, DO NOT OUTPUT)
+                    - Every "exam" question MUST end with a pure-integer bracket mark like [10].
+                    - No "understanding" question may contain '[' or ']'.
+                    - Do not output any item that is not verbatim from the input.
+
+                    SYLLABUS + TEXT:
+
                     `+
                     text;
                     const aiResponse = await puter.ai.chat(prompt, {
-                        model: "gpt-5-nano"
+                        model: "gpt-4o-mini"
                     });
                     
                     // Handle different response formats
