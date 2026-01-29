@@ -15,7 +15,7 @@
     </style>
 </head>
 <body>
-    <h1>FastAPI + Puter.js Connection Test</h1>
+    <h1>Graili (Grail Improved) </h1>
     
     <h2>1. Test Backend Connection</h2>
     <button onclick="testConnection()">Test FastAPI Connection</button>
@@ -66,9 +66,9 @@
                 const dataRes = await fetch(`${API_URL}/data`);
                 const { text } = await dataRes.json();
                 resultDiv.innerHTML += `\n   ✓ Got text: "${text.substring(0, 50)}..."`;
-
+                model = "gemini-2.5-flash-lite"
                 // 2. Run Puter AI
-                resultDiv.innerHTML += "\n\n2. Sending to Puter.js AI...";
+                resultDiv.innerHTML += `\n\n2. Sending to ${model} ...`;
                 
                 let output;
                 try {
@@ -111,17 +111,30 @@
                     If a pure-integer mark is found by rule (1) or (2), append it to the end of the question text separated by a single space, exactly as written (e.g., "... [10]").
                     If no such mark is attached, DO NOT add any brackets.
 
-                    THEME MAPPING
-                    For each extracted sub-question, set "theme" to the most specific matching theme/subtheme from the provided syllabus. If syllabus mapping is uncertain, set theme to "Unknown" (do NOT guess).
+                    THEME & SUBTHEME MAPPING (STRICT)
+
+                    - You MUST assign a syllabus chapter AND subchapter number (e.g. 2.2.2) to EVERY extracted question.
+                    - Do NOT output "Unknown".
+                    - Do NOT skip chapter assignment.
+                    - Use the MOST SPECIFIC applicable subchapter number from the syllabus.
+
+                    Theme format MUST be:
+                    "<syllabus_number> <syllabus_chapter_title>"
+
+                    Examples:
+                    - "2.2.2 Inflation and its causes"
+                    - "1.3.1 Price controls"
+                    - "3.1.4 Trade protectionism"
+
 
                     OUTPUT FORMAT (STRICT JSON ONLY)
                     Return JSON ONLY in this exact structure:
                     {
                     "exam": [
-                        { "theme": "<theme>", "question": "<verbatim question text with attached mark if present>" }
+                        { "chapter": "<chapter>", "question": "<verbatim question text with attached mark if present>", "marks": <number of marks allocated>}
                     ],
                     "understanding": [
-                        { "theme": "<theme>", "question": "<verbatim question text with NO marks>" }
+                        { "chapter": "<chapter>", "question": "<verbatim question text with NO marks>" }
                     ]
                     }
 
@@ -135,7 +148,7 @@
                     `+
                     text;
                     const aiResponse = await puter.ai.chat(prompt, {
-                        model: "gpt-4o-mini"
+                        model: model
                     });
                     
                     // Handle different response formats
@@ -155,14 +168,30 @@
                 }
 
                 resultDiv.innerHTML += `\n  Response "${output}"`;
-
-                // 3. Send result back to backend
                 resultDiv.innerHTML += "\n\n3. Sending AI result to backend...";
+                let resultObj;
+                try {
+                    const cleaned = output.replace(/```json|```/g, "").trim();
+                    resultObj = JSON.parse(cleaned);
+                } catch (e) {
+                    throw new Error("AI output is not valid JSON");
+                }
                 const postRes = await fetch(`${API_URL}/ai-result`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ result: output })
+                    
+                    body: JSON.stringify({
+                        "result": resultObj,
+                        "context": {
+                            "year": 2023,
+                            "subject": "Economics",
+                            "category": "A-Level",
+                            "question_type": "exam",
+                            "source": "Holy Grail PDF"  
+                        }
+                    })
                 });
+                
                 const postData = await postRes.json();
                 resultDiv.innerHTML += `\n   ✓ Backend response: ${JSON.stringify(postData)}`;
 
