@@ -148,6 +148,17 @@ export default function App() {
   const [status, setStatus] = useState({ type: "idle", message: "" });
   const [isLoading, setIsLoading] = useState(false);
 
+  const buttonBase =
+    "inline-flex items-center justify-center rounded-xl px-4 py-2.5 text-sm font-semibold shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60";
+  const primaryButton = `${buttonBase} bg-emerald-600 text-white hover:bg-emerald-700 focus-visible:ring-emerald-500`;
+  const secondaryButton = `${buttonBase} border border-slate-200 bg-white text-slate-900 hover:bg-slate-50 focus-visible:ring-slate-400`;
+  const accentButton = `${buttonBase} bg-rose-600 text-white hover:bg-rose-700 focus-visible:ring-rose-500`;
+  const statusStyles = {
+    idle: "border-slate-200 bg-white text-slate-600",
+    success: "border-emerald-200 bg-emerald-50 text-emerald-700",
+    error: "border-rose-200 bg-rose-50 text-rose-700",
+  };
+
   const loadSubjects = async () => {
     try {
       const res = await fetch(`${API_URL}/subjects`);
@@ -425,197 +436,310 @@ export default function App() {
   };
 
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">G</div>
-          <div>
-            <h1>Grail Questions</h1>
-            <p>Filter by syllabus chapter and year.</p>
-          </div>
-        </div>
-
-        <div className="field">
-          <label htmlFor="subject">Subject</label>
-          <select
-            id="subject"
-            value={subject}
-            onChange={(event) => setSubject(event.target.value)}
-          >
-            <option value="All">All subjects</option>
-            {subjects.map((item) => (
-              <option key={item} value={item}>
-                {item}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="subtopic-header">
-          <h2>Subtopics</h2>
-          <input
-            placeholder="Search subtopics"
-            value={subtopicSearch}
-            onChange={(event) => setSubtopicSearch(event.target.value)}
-          />
-        </div>
-
-        <div className="subtopic-list">
-          {filteredSubtopics.map((subtopic) => {
-            const isActive = selectedSubtopic?.id === subtopic.id;
-            return (
-              <button
-                type="button"
-                key={subtopic.id}
-                className={`subtopic-item ${isActive ? "active" : ""}`}
-                onClick={() => setSelectedSubtopic(subtopic)}
-              >
-                <span>{subtopic.code}</span>
-                <span>{subtopic.title}</span>
-              </button>
-            );
-          })}
-          {filteredSubtopics.length === 0 && (
-            <p className="empty">No subtopics yet. Add them via the API.</p>
-          )}
-        </div>
-      </aside>
-
-      <main className="main">
-        <section className="hero">
-          <div>
-            <h2>Curate the question bank</h2>
-            <p>
-              Select a context, sync it to the backend, then run extraction or load
-              matching questions.
-            </p>
-          </div>
-          <div className="status">
-            <span className={`status-pill ${status.type}`}>{status.message || "Ready"}</span>
-          </div>
-        </section>
-
-        <section className="syllabus-panel">
-          <div>
-            <h3>Seed subtopics from syllabus</h3>
-            <p>
-              Upload the syllabus PDF for the selected subject and let Gemini extract the
-              subtopic list.
-            </p>
-          </div>
-          <div className="syllabus-actions">
-            <input
-              type="file"
-              accept="application/pdf"
-              onChange={(event) => setSyllabusFile(event.target.files?.[0] || null)}
-            />
-            <button
-              className="primary"
-              onClick={extractSubtopicsFromSyllabus}
-              disabled={isLoading}
-            >
-              Extract subtopics
-            </button>
-          </div>
-          {syllabusFile && (
-            <p className="file-note">Selected: {syllabusFile.name}</p>
-          )}
-        </section>
-
-        <section className="filters">
-          <div className="field">
-            <label htmlFor="year">Year</label>
-            <select
-              id="year"
-              value={year}
-              onChange={(event) => setYear(event.target.value)}
-            >
-              <option value="All">All years</option>
-              {years.map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="field">
-            <label htmlFor="category">Category</label>
-            <select
-              id="category"
-              value={category}
-              onChange={(event) => setCategory(event.target.value)}
-            >
-              <option value="All">All categories</option>
-              {categories.map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="field">
-            <label htmlFor="questionType">Question type</label>
-            <select
-              id="questionType"
-              value={questionType}
-              onChange={(event) => setQuestionType(event.target.value)}
-            >
-              {questionTypeOptions.map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </div>
-
-        </section>
-
-        <section className="actions">
-          <button type="button" className="secondary" onClick={syncContext} disabled={isLoading}>
-            Sync context
-          </button>
-          <button type="button" className="primary" onClick={loadQuestions} disabled={isLoading}>
-            {isLoading ? "Loading..." : "Load questions"}
-          </button>
-          <button type="button" className="accent" onClick={runAiPipeline} disabled={isLoading}>
-            Run AI extraction
-          </button>
-        </section>
-
-        <section className="cards">
-          {questions.map((question, index) => (
-            <article
-              key={question.id}
-              className="card"
-              style={{ animationDelay: `${index * 60}ms` }}
-            >
-              <div className="card-meta">
-                
-                <span>{question.year}</span>
-                <span>{question.category}</span>
-                <span>{question.question_type}</span>
+    <div className="min-h-screen bg-gradient-to-br from-amber-50 via-amber-100/40 to-slate-100 font-display text-slate-900">
+      <div className="relative">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -top-24 left-24 h-72 w-72 rounded-full bg-amber-200/60 blur-3xl"
+        />
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute bottom-10 right-8 h-64 w-64 rounded-full bg-sky-200/60 blur-3xl"
+        />
+      </div>
+      <div className="relative z-10 mx-auto w-full max-w-7xl px-4 py-6 lg:px-6 lg:py-8">
+        <div className="grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
+          <aside className="order-2 flex flex-col gap-6 rounded-2xl border border-slate-200 bg-slate-100/80 p-5 shadow-sm lg:order-1 lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)]">
+            <div className="flex items-center gap-4">
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500 text-lg font-semibold text-white">
+                G
               </div>
-              <div className="card-body">
-                <h3>{question.document_name || "Untitled document"}</h3>
-                <p>{question.question_text}</p>
-                <div className="card-tags">
-                  <span>{question.subject}</span>
-                  <span>{question.source_link || "Source pending"}</span>
+              <div>
+                <h1 className="text-lg font-semibold text-slate-900">Grail Questions</h1>
+                <p className="text-sm text-slate-600">Filter by syllabus chapter and year.</p>
+              </div>
+            </div>
+
+            <div className="space-y-2 text-sm">
+              <label htmlFor="subject" className="font-semibold text-slate-800">
+                Subject
+              </label>
+              <select
+                id="subject"
+                value={subject}
+                onChange={(event) => setSubject(event.target.value)}
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
+              >
+                <option value="All">All subjects</option>
+                {subjects.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-800">Subtopics</h2>
+                <label htmlFor="subtopic-search" className="sr-only">
+                  Search subtopics
+                </label>
+                <input
+                  id="subtopic-search"
+                  placeholder="Search subtopics"
+                  value={subtopicSearch}
+                  onChange={(event) => setSubtopicSearch(event.target.value)}
+                  className="mt-2 w-full rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                />
+              </div>
+            </div>
+
+            <div className="flex-1 space-y-2 overflow-auto pr-1">
+              {filteredSubtopics.map((subtopic) => {
+                const isActive = selectedSubtopic?.id === subtopic.id;
+                return (
+                  <button
+                    type="button"
+                    key={subtopic.id}
+                    className={`w-full rounded-xl border px-3 py-2 text-left text-sm transition ${
+                      isActive
+                        ? "border-amber-300 bg-amber-50 shadow-sm"
+                        : "border-transparent bg-white hover:border-slate-200"
+                    }`}
+                    onClick={() => setSelectedSubtopic(subtopic)}
+                  >
+                    <span className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      {subtopic.code}
+                    </span>
+                    <span className="mt-1 block text-sm font-medium text-slate-900">
+                      {subtopic.title}
+                    </span>
+                  </button>
+                );
+              })}
+              {filteredSubtopics.length === 0 && (
+                <p className="text-sm text-slate-500">No subtopics yet. Add them via the API.</p>
+              )}
+            </div>
+          </aside>
+
+          <main className="order-1 flex flex-col gap-6 lg:order-2">
+            <section className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm backdrop-blur">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-amber-600">
+                    Curate the question bank
+                  </p>
+                  <h2 className="mt-2 text-3xl font-semibold text-slate-900">
+                    Curate the question bank
+                  </h2>
+                  <p className="mt-2 text-sm text-slate-600">
+                    Select a context, sync it to the backend, then run extraction or load
+                    matching questions.
+                  </p>
+                </div>
+                <div className="flex items-start lg:justify-end">
+                  <span
+                    role="status"
+                    className={`inline-flex items-center rounded-full border px-4 py-2 text-xs font-semibold ${
+                      statusStyles[status.type] || statusStyles.idle
+                    }`}
+                  >
+                    {status.message || "Ready"}
+                  </span>
                 </div>
               </div>
-              <div className="card-score">
-                <span>{question.marks ?? "-"}</span>
-                <small>marks</small>
+            </section>
+
+            <section className="rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm">
+              <div>
+                <h3 className="text-lg font-semibold text-slate-900">
+                  Seed subtopics from syllabus
+                </h3>
+                <p className="mt-2 text-sm text-slate-600">
+                  Upload the syllabus PDF for the selected subject and let Gemini extract the
+                  subtopic list.
+                </p>
               </div>
-            </article>
-          ))}
-          {questions.length === 0 && (
-            <div className="empty-card">No questions yet. Try running extraction.</div>
-          )}
-        </section>
-      </main>
+              <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center">
+                <div className="flex-1 space-y-2">
+                  <label htmlFor="syllabus-file" className="text-sm font-medium text-slate-700">
+                    Syllabus PDF
+                  </label>
+                  <input
+                    id="syllabus-file"
+                    type="file"
+                    accept="application/pdf"
+                    onChange={(event) => setSyllabusFile(event.target.files?.[0] || null)}
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm file:mr-4 file:rounded-lg file:border-0 file:bg-slate-100 file:px-3 file:py-1 file:text-sm file:font-semibold file:text-slate-700 hover:file:bg-slate-200 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                  />
+                </div>
+                <button
+                  className={primaryButton}
+                  onClick={extractSubtopicsFromSyllabus}
+                  disabled={isLoading}
+                >
+                  Extract subtopics
+                </button>
+              </div>
+              {syllabusFile && (
+                <p className="mt-3 text-xs text-slate-500">Selected: {syllabusFile.name}</p>
+              )}
+            </section>
+
+            <section className="grid gap-4 rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm md:grid-cols-3">
+              <div className="space-y-2 text-sm">
+                <label htmlFor="year" className="font-semibold text-slate-800">
+                  Year
+                </label>
+                <select
+                  id="year"
+                  value={year}
+                  onChange={(event) => setYear(event.target.value)}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                >
+                  <option value="All">All years</option>
+                  {years.map((value) => (
+                    <option key={value} value={value}>
+                      {value}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-2 text-sm">
+                <label htmlFor="category" className="font-semibold text-slate-800">
+                  Category
+                </label>
+                <select
+                  id="category"
+                  value={category}
+                  onChange={(event) => setCategory(event.target.value)}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                >
+                  <option value="All">All categories</option>
+                  {categories.map((value) => (
+                    <option key={value} value={value}>
+                      {value}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-2 text-sm">
+                <label htmlFor="questionType" className="font-semibold text-slate-800">
+                  Question type
+                </label>
+                <select
+                  id="questionType"
+                  value={questionType}
+                  onChange={(event) => setQuestionType(event.target.value)}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                >
+                  {questionTypeOptions.map((value) => (
+                    <option key={value} value={value}>
+                      {value}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </section>
+
+            <section className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                className={secondaryButton}
+                onClick={syncContext}
+                disabled={isLoading}
+              >
+                Sync context
+              </button>
+              <button
+                type="button"
+                className={primaryButton}
+                onClick={loadQuestions}
+                disabled={isLoading}
+              >
+                {isLoading ? "Loading..." : "Load questions"}
+              </button>
+              <button
+                type="button"
+                className={accentButton}
+                onClick={runAiPipeline}
+                disabled={isLoading}
+              >
+                Run AI extraction
+              </button>
+            </section>
+
+            <section className="space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-semibold text-slate-900">Results</h3>
+                <p className="text-xs uppercase tracking-wide text-slate-500">
+                  {questions.length} total
+                </p>
+              </div>
+              <div className="space-y-4">
+                {questions.map((question) => (
+                  <article
+                    key={question.id}
+                    className="grid gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:grid-cols-[140px_minmax(0,1fr)_90px]"
+                  >
+                    <div className="space-y-2 text-xs uppercase tracking-wide text-slate-500">
+                      <span className="block">{question.year}</span>
+                      <span className="block">{question.category}</span>
+                      <span className="block">{question.question_type}</span>
+                    </div>
+                    <div>
+                      <h3 className="text-base font-semibold text-slate-900">
+                        {question.document_name || "Untitled document"}
+                      </h3>
+                      <p className="mt-2 text-sm text-slate-700">{question.question_text}</p>
+                      <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
+                        <span className="rounded-full bg-slate-100 px-2 py-1">
+                          {question.subject}
+                        </span>
+                        <span className="rounded-full bg-slate-100 px-2 py-1">
+                          {question.source_link || "Source pending"}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-start lg:justify-center">
+                      <div className="rounded-2xl bg-amber-50 px-4 py-3 text-center">
+                        <p className="text-lg font-semibold text-slate-900">
+                          {question.marks ?? "-"}
+                        </p>
+                        <p className="text-[10px] uppercase tracking-wide text-slate-500">
+                          marks
+                        </p>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+                {questions.length === 0 && (
+                  <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-slate-300 bg-white/80 px-6 py-10 text-center">
+                    <p className="text-sm font-semibold text-slate-800">
+                      No questions yet. Pull a context or run extraction to populate results.
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      Sync the context, load questions, or run the AI extraction pipeline.
+                    </p>
+                    <button
+                      type="button"
+                      className={accentButton}
+                      onClick={runAiPipeline}
+                      disabled={isLoading}
+                    >
+                      Run AI extraction
+                    </button>
+                  </div>
+                )}
+              </div>
+            </section>
+          </main>
+        </div>
+      </div>
     </div>
   );
 }
