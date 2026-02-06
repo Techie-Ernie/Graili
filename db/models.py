@@ -62,6 +62,7 @@ class UploadedQuestion(Base):
 
     question_text = Column(Text, nullable=False)
     marks = Column(Integer)
+    session_id = Column(String, nullable=True)
     document_name = Column(Text)
     source_link = Column(Text)
     answer_link = Column(Text)

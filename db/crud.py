@@ -10,6 +10,7 @@ def create_schema():
         conn.execute(text("DROP INDEX IF EXISTS idx_uploaded_questions_subject_year;"))
         conn.execute(text("ALTER TABLE questions DROP COLUMN IF EXISTS year;"))
         conn.execute(text("ALTER TABLE uploaded_questions DROP COLUMN IF EXISTS year;"))
+        conn.execute(text("ALTER TABLE uploaded_questions ADD COLUMN IF NOT EXISTS session_id VARCHAR;"))
 
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS idx_questions_type
@@ -49,6 +50,11 @@ def create_schema():
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS idx_uploaded_questions_marks
             ON uploaded_questions (marks);
+        """))
+
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_uploaded_questions_session_id
+            ON uploaded_questions (session_id);
         """))
 
         conn.execute(text("""

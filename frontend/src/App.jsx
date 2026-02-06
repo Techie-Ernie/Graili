@@ -10,6 +10,7 @@ const CANONICAL_CATEGORY = "GCE 'A' Levels";
 const RESULTS_PAGE_SIZE = 8;
 const DEFAULT_SCRAPER_PAGES = 2;
 const MAX_SCRAPER_PAGES = 20;
+const CLIENT_SESSION_STORAGE_KEY = "graili_client_session_id";
 
 
 const basePrompt = `
@@ -156,6 +157,17 @@ function sanitizePageCount(value) {
   return Math.min(parsed, MAX_SCRAPER_PAGES);
 }
 
+function getOrCreateClientSessionId() {
+  if (typeof window === "undefined") return "server-session";
+  const existing = window.sessionStorage.getItem(CLIENT_SESSION_STORAGE_KEY);
+  if (existing) return existing;
+  const generated =
+    window.crypto?.randomUUID?.() ||
+    `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  window.sessionStorage.setItem(CLIENT_SESSION_STORAGE_KEY, generated);
+  return generated;
+}
+
 export default function App() {
   const [subjects, setSubjects] = useState([]);
   const [subject, setSubject] = useState("All");
@@ -181,6 +193,15 @@ export default function App() {
   const [sourceCounts, setSourceCounts] = useState({ scraped: 0, uploaded: 0 });
   const [status, setStatus] = useState({ type: "idle", message: "" });
   const [isLoading, setIsLoading] = useState(false);
+  const [clientSessionId] = useState(() => getOrCreateClientSessionId());
+
+  const apiFetch = (url, options = {}) => {
+    const headers = new Headers(options.headers || {});
+    if (clientSessionId && !headers.has("X-Client-Session")) {
+      headers.set("X-Client-Session", clientSessionId);
+    }
+    return fetch(url, { ...options, headers });
+  };
 
   const buttonBase =
     "inline-flex items-center justify-center rounded-xl px-4 py-2.5 text-sm font-semibold shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60";
@@ -206,7 +227,7 @@ export default function App() {
 
   const loadSubjects = async () => {
     try {
-      const res = await fetch(`${API_URL}/subjects`);
+      const res = await apiFetch(`${API_URL}/subjects`);
       const data = await res.json();
       if (Array.isArray(data.subjects) && data.subjects.length > 0) {
         setSubjects(data.subjects);
@@ -225,7 +246,7 @@ export default function App() {
       return;
     }
     try {
-      const res = await fetch(`${API_URL}/subtopics?${buildQuery({ subject: targetSubject })}`);
+      const res = await apiFetch(`${API_URL}/subtopics?${buildQuery({ subject: targetSubject })}`);
       const data = await res.json();
       setSubtopics(Array.isArray(data.subtopics) ? data.subtopics : []);
       setSelectedSubtopicCodes([]);
@@ -239,7 +260,7 @@ export default function App() {
       const query = targetSubject && targetSubject !== "All"
         ? buildQuery({ subject: targetSubject })
         : "";
-      const res = await fetch(`${API_URL}/collections${query ? `?${query}` : ""}`);
+      const res = await apiFetch(`${API_URL}/collections${query ? `?${query}` : ""}`);
       if (!res.ok) {
         throw new Error("Could not load collections.");
       }
@@ -262,7 +283,7 @@ export default function App() {
 
   const loadFilters = async () => {
     try {
-      const res = await fetch(`${API_URL}/questions/filters`);
+      const res = await apiFetch(`${API_URL}/questions/filters`);
       const data = await res.json();
       if (Array.isArray(data.categories) && data.categories.length > 0) {
         setCategories(data.categories);
@@ -391,7 +412,7 @@ export default function App() {
     }
     try {
       const targetSubject = subject;
-      const res = await fetch(`${API_URL}/collections`, {
+      const res = await apiFetch(`${API_URL}/collections`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -436,7 +457,7 @@ export default function App() {
       pages: sanitizePageCount(overrides.pages ?? scraperPages),
       subject_label: subjectLabel,
     };
-    await fetch(`${API_URL}/scraper/config`, {
+    await apiFetch(`${API_URL}/scraper/config`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(scraperConfig),
@@ -451,8 +472,9 @@ export default function App() {
       source_link: overrides.source_link ?? "",
       document_name: overrides.document_name ?? document_name,
       source_type: overrides.source_type ?? "scraped",
+      client_session_id: clientSessionId,
     };
-    await fetch(`${API_URL}/context`, {
+    await apiFetch(`${API_URL}/context`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -480,7 +502,7 @@ export default function App() {
         subtopics: selectedSubtopicCodes.join(","),
         collections: selectedCollectionIds.join(","),
       };
-      const res = await fetch(`${API_URL}/questions?${buildQuery(params)}`);
+      const res = await apiFetch(`${API_URL}/questions?${buildQuery(params)}`);
       if (!res.ok) {
         const detail = await res.text();
         throw new Error(detail || "Could not fetch questions.");
@@ -516,7 +538,7 @@ export default function App() {
       formData.append("subject", subject);
       formData.append("file", syllabusFile);
 
-      const uploadRes = await fetch(`${API_URL}/syllabus/extract`, {
+      const uploadRes = await apiFetch(`${API_URL}/syllabus/extract`, {
         method: "POST",
         body: formData,
       });
@@ -554,7 +576,7 @@ export default function App() {
         subtopics: cleanedSubtopics,
       };
 
-      const subtopicRes = await fetch(`${API_URL}/subtopics/bulk`, {
+      const subtopicRes = await apiFetch(`${API_URL}/subtopics/bulk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -576,7 +598,7 @@ export default function App() {
   };
 
   const pushContext = async (contextPayload) => {
-    await fetch(`${API_URL}/context`, {
+    await apiFetch(`${API_URL}/context`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(contextPayload),
@@ -586,7 +608,10 @@ export default function App() {
   const processDocumentPayloads = async (documentPayloads, label) => {
     for (let index = 0; index < documentPayloads.length; index += 1) {
       const { text, context } = documentPayloads[index] || {};
-      const contextPayload = context;
+      const contextPayload = {
+        ...(context || {}),
+        client_session_id: clientSessionId,
+      };
 
       if (contextPayload?.document_name) {
         setDocumentName(contextPayload.document_name);
@@ -603,7 +628,7 @@ export default function App() {
 
       const subjectForPrompt = contextPayload?.subject || (subject === "All" ? "" : subject);
       const subtopicRes = subjectForPrompt
-        ? await fetch(`${API_URL}/subtopics?${buildQuery({ subject: subjectForPrompt })}`)
+        ? await apiFetch(`${API_URL}/subtopics?${buildQuery({ subject: subjectForPrompt })}`)
         : null;
       const subtopicData = subtopicRes ? await subtopicRes.json() : { subtopics: [] };
       const subtopicLines = (subtopicData.subtopics || [])
@@ -627,7 +652,7 @@ export default function App() {
 
       const resultObj = parseAiJson(output);
 
-      const postRes = await fetch(`${API_URL}/ai-result`, {
+      const postRes = await apiFetch(`${API_URL}/ai-result`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ result: resultObj, context: contextPayload }),
@@ -651,7 +676,7 @@ export default function App() {
 
     try {
       await syncContext({ source_type: "scraped" });
-      const dataRes = await fetch(`${API_URL}/data`);
+      const dataRes = await apiFetch(`${API_URL}/data`);
       if (!dataRes.ok) {
         const detail = await dataRes.text();
         throw new Error(detail || "Could not load scraped document text.");
@@ -692,11 +717,12 @@ export default function App() {
       const formData = new FormData();
       formData.append("subject", subject === "All" ? "Economics" : subject);
       formData.append("category", category === "All" ? CANONICAL_CATEGORY : category);
+      formData.append("client_session_id", clientSessionId);
       questionUploadFiles.forEach((file) => {
         formData.append("files", file);
       });
 
-      const uploadRes = await fetch(`${API_URL}/uploads/question-documents/extract`, {
+      const uploadRes = await apiFetch(`${API_URL}/uploads/question-documents/extract`, {
         method: "POST",
         body: formData,
       });
@@ -735,7 +761,7 @@ export default function App() {
       return;
     }
     try {
-      const res = await fetch(`${API_URL}/collections/documents`, {
+      const res = await apiFetch(`${API_URL}/collections/documents`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pymupdf
@@ -52,6 +52,7 @@ class QuestionContext(BaseModel):
     source_link: str
     document_name: str
     source_type: Literal["scraped", "uploaded"] = "scraped"
+    client_session_id: Optional[str] = None
 
 class AIResultRequest(BaseModel):
     result: Dict[str, Any]
@@ -239,6 +240,16 @@ def normalize_category(category: Optional[str]) -> Optional[str]:
     return normalized
 
 
+def get_client_session_id(request: Request) -> Optional[str]:
+    value = request.headers.get("X-Client-Session")
+    if value is None:
+        value = request.query_params.get("client_session_id")
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
 def load_syllabus_text(subject: str) -> str:
     preferred_path = SYLLABI_DIR / f"{safe_subject_name(subject)}.txt"
     fallback_path = SYLLABI_DIR / "econs.txt"
@@ -380,13 +391,16 @@ def _upsert_question(model: type[Question] | type[UploadedQuestion], data: dict)
     if "category" in data:
         data["category"] = normalize_category(data.get("category"))
     with Session(engine) as session:
+        filters = [
+            model.subject == data.get("subject"),
+            model.question_text == data.get("question_text"),
+            model.document_name == data.get("document_name"),
+        ]
+        if model is UploadedQuestion:
+            filters.append(model.session_id == data.get("session_id"))
         existing = (
             session.query(model)
-            .filter(
-                model.subject == data.get("subject"),
-                model.question_text == data.get("question_text"),
-                model.document_name == data.get("document_name"),
-            )
+            .filter(*filters)
             .first()
         )
         if existing:
@@ -658,6 +672,7 @@ def get_data():
 async def extract_uploaded_question_documents(
     subject: str = Form(...),
     category: str = Form("GCE 'A' Levels"),
+    client_session_id: Optional[str] = Form(None),
     files: list[UploadFile] = File(...),
 ):
     if not files:
@@ -687,6 +702,7 @@ async def extract_uploaded_question_documents(
             source_link="",
             document_name=document_name,
             source_type="uploaded",
+            client_session_id=(client_session_id or None),
         )
         documents_payload.append(build_prompt_payload(model_prompt, context, syllabus_text))
 
@@ -778,6 +794,7 @@ def add_collection_document(payload: CollectionDocumentCreate):
 
 @app.get("/questions")
 def get_questions(
+    request: Request,
     subject: Optional[str] = None,
     category: Optional[str] = None,
     question_type: Optional[str] = None,
@@ -786,6 +803,8 @@ def get_questions(
     collections: Optional[str] = None,
     source_type: Optional[str] = None,
 ):
+    client_session_id = get_client_session_id(request)
+
     def normalize_filter(value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
@@ -831,6 +850,10 @@ def get_questions(
         source_tag: str,
     ) -> list[dict[str, Any]]:
         query = session.query(model)
+        if source_tag == "uploaded":
+            if not client_session_id:
+                return []
+            query = query.filter(model.session_id == client_session_id)
         if subject:
             query = query.filter(model.subject == subject)
         if collection_ids:
@@ -949,21 +972,30 @@ def get_questions(
     }
 
 @app.get("/questions/filters")
-def get_question_filters():
+def get_question_filters(request: Request):
+    client_session_id = get_client_session_id(request)
     with Session(engine) as session:
         scraped_subjects = {row[0] for row in session.execute(select(Question.subject).distinct()).all() if row[0]}
-        uploaded_subjects = {
-            row[0] for row in session.execute(select(UploadedQuestion.subject).distinct()).all() if row[0]
-        }
+        uploaded_query = select(UploadedQuestion.subject)
+        if client_session_id:
+            uploaded_query = uploaded_query.where(UploadedQuestion.session_id == client_session_id)
+        uploaded_subjects = {row[0] for row in session.execute(uploaded_query.distinct()).all() if row[0]}
         scraped_categories = {
             row[0] for row in session.execute(select(Question.category).distinct()).all() if row[0]
         }
-        uploaded_categories = {
-            row[0] for row in session.execute(select(UploadedQuestion.category).distinct()).all() if row[0]
-        }
+        uploaded_category_query = select(UploadedQuestion.category)
+        if client_session_id:
+            uploaded_category_query = uploaded_category_query.where(UploadedQuestion.session_id == client_session_id)
+        uploaded_categories = {row[0] for row in session.execute(uploaded_category_query.distinct()).all() if row[0]}
         source_counts = {
             "scraped": session.query(Question).count(),
-            "uploaded": session.query(UploadedQuestion).count(),
+            "uploaded": (
+                session.query(UploadedQuestion)
+                .filter(UploadedQuestion.session_id == client_session_id)
+                .count()
+                if client_session_id
+                else 0
+            ),
         }
     return {
         "subjects": sorted(scraped_subjects | uploaded_subjects),
@@ -1003,6 +1035,9 @@ def receive_ai_result(payload: AIResultRequest):
         target_source = (context.source_type or "scraped").lower()
         if target_source not in {"scraped", "uploaded"}:
             raise HTTPException(status_code=400, detail="Invalid context.source_type")
+        client_session_id = (context.client_session_id or "").strip() or None
+        if target_source == "uploaded" and not client_session_id:
+            raise HTTPException(status_code=400, detail="Missing client_session_id for uploaded source.")
         insert_fn = insert_question if target_source == "scraped" else insert_uploaded_question
         data = payload.result
         # parse the exam-style questions 
@@ -1020,6 +1055,8 @@ def receive_ai_result(payload: AIResultRequest):
                 "question_text": row["question"],
                 "marks": row["marks"],
             }
+            if target_source == "uploaded":
+                data_json["session_id"] = client_session_id
             insert_fn(data_json)
         for row in data.get("understanding", []):
             print("Understanding row:", row)
@@ -1033,6 +1070,8 @@ def receive_ai_result(payload: AIResultRequest):
                 "question_text": row["question"],
                 "marks": None,
             }
+            if target_source == "uploaded":
+                data_json["session_id"] = client_session_id
             insert_fn(data_json)
         return {"status": "received", "source_type": target_source}
     except HTTPException:
