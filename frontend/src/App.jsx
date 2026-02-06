@@ -7,11 +7,7 @@ const defaultSubjects = [];
 const defaultCategories = [];
 const questionTypeOptions = ["exam", "understanding"];
 const CANONICAL_CATEGORY = "GCE 'A' Levels";
-
-const fallbackYears = Array.from({ length: 10 }, (_, index) => {
-  const year = new Date().getFullYear() - index;
-  return year;
-});
+const RESULTS_PAGE_SIZE = 8;
 
 
 const basePrompt = `
@@ -89,21 +85,27 @@ SYLLABUS + TEXT:
 `;
 
 const subtopicPrompt = `
-You are a strict information extraction engine. Extract syllabus subject and subtopics from the input text.
+You are a strict information extraction engine. Extract syllabus subject, main themes, and subthemes from the input text.
 
 Rules:
-- A subject is the name of the subject and its subject code e.g. Economics (Syllabus 9750) and Physics (Syllabus 6091) 
-- A subtopic is a dotted numeric code followed by a title. Examples: "1.1 Functions", "2.3.4 Elasticity".
-- If a line is only a dotted numeric code, use the next non-empty line as its title.
-- Ignore any non-subtopic content (prefaces, assessment objectives, admin sections).
+- A subject is the name of the subject and its subject code, e.g. Economics (Syllabus 9750), Physics (Syllabus 6091).
+- Capture BOTH:
+  1) Main themes (top-level code, e.g. "1", "2", "3")
+  2) Subthemes (nested code, e.g. "1.1", "1.2.3")
+- A theme/subtheme is a numeric code followed by a title.
+- If a line is only a numeric code, use the next non-empty line as its title.
+- Keep the most specific title associated with each code.
+- Ignore non-theme content (prefaces, assessment objectives, admin sections).
 - Do not invent or paraphrase.
 - No duplicates by code.
+- Return all items in a single flat list in ascending code order.
 
 Output JSON ONLY in this shape:
 {
   "subject": "Economics (9750)",
   "subtopics": [
-    { "code": "1.1", "title": "Functions" }
+    { "code": "1", "title": "Price mechanism and its applications" },
+    { "code": "1.1", "title": "Demand and supply analysis and its applications" }
   ]
 }
 
@@ -130,35 +132,68 @@ function normalizeCategory(value) {
   return value;
 }
 
+function compareCodes(a, b) {
+  const aParts = String(a)
+    .split(".")
+    .map((part) => Number.parseInt(part, 10));
+  const bParts = String(b)
+    .split(".")
+    .map((part) => Number.parseInt(part, 10));
+  const maxLen = Math.max(aParts.length, bParts.length);
+  for (let i = 0; i < maxLen; i += 1) {
+    const aVal = Number.isNaN(aParts[i]) ? -1 : (aParts[i] ?? -1);
+    const bVal = Number.isNaN(bParts[i]) ? -1 : (bParts[i] ?? -1);
+    if (aVal !== bVal) return aVal - bVal;
+  }
+  return String(a).localeCompare(String(b));
+}
+
 export default function App() {
   const [subjects, setSubjects] = useState([]);
   const [subject, setSubject] = useState("All");
   const [subtopics, setSubtopics] = useState([]);
-  const [subtopicSearch, setSubtopicSearch] = useState("");
-  const [selectedSubtopic, setSelectedSubtopic] = useState(null);
+  const [selectedSubtopicCodes, setSelectedSubtopicCodes] = useState([]);
+  const [collections, setCollections] = useState([]);
+  const [selectedCollectionIds, setSelectedCollectionIds] = useState([]);
+  const [newCollectionName, setNewCollectionName] = useState("");
+  const [collectionForAddId, setCollectionForAddId] = useState("");
 
   const [categories, setCategories] = useState([]);
-  const [years, setYears] = useState([]);
   const [category, setCategory] = useState("All");
-  const [year, setYear] = useState("All");
   const [document_name, setDocumentName] = useState("Document Name");
   const [questionType, setQuestionType] = useState(questionTypeOptions[0]);
   const [syllabusFile, setSyllabusFile] = useState(null);
+  const [questionUploadFiles, setQuestionUploadFiles] = useState([]);
 
-  const [questions, setQuestions] = useState([]);
+  const [scrapedQuestions, setScrapedQuestions] = useState([]);
+  const [uploadedQuestions, setUploadedQuestions] = useState([]);
+  const [resultsView, setResultsView] = useState("scraped");
+  const [resultsPage, setResultsPage] = useState(1);
+  const [sourceCounts, setSourceCounts] = useState({ scraped: 0, uploaded: 0 });
   const [status, setStatus] = useState({ type: "idle", message: "" });
   const [isLoading, setIsLoading] = useState(false);
 
   const buttonBase =
     "inline-flex items-center justify-center rounded-xl px-4 py-2.5 text-sm font-semibold shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60";
   const primaryButton = `${buttonBase} bg-emerald-600 text-white hover:bg-emerald-700 focus-visible:ring-emerald-500`;
-  const secondaryButton = `${buttonBase} border border-slate-200 bg-white text-slate-900 hover:bg-slate-50 focus-visible:ring-slate-400`;
   const accentButton = `${buttonBase} bg-rose-600 text-white hover:bg-rose-700 focus-visible:ring-rose-500`;
   const statusStyles = {
     idle: "border-slate-200 bg-white text-slate-600",
     success: "border-emerald-200 bg-emerald-50 text-emerald-700",
     error: "border-rose-200 bg-rose-50 text-rose-700",
   };
+  const totalQuestions = scrapedQuestions.length + uploadedQuestions.length;
+  const displayedQuestions = resultsView === "uploaded" ? uploadedQuestions : scrapedQuestions;
+  const displayedSourceLabel = resultsView === "uploaded" ? "uploaded" : "scraped";
+  const displayedEmptyLabel = resultsView === "uploaded"
+    ? "No user-uploaded questions for the current filters."
+    : "No scraped questions for the current filters.";
+  const totalResultPages = Math.max(1, Math.ceil(displayedQuestions.length / RESULTS_PAGE_SIZE));
+  const safeResultsPage = Math.min(resultsPage, totalResultPages);
+  const pagedQuestions = displayedQuestions.slice(
+    (safeResultsPage - 1) * RESULTS_PAGE_SIZE,
+    safeResultsPage * RESULTS_PAGE_SIZE
+  );
 
   const loadSubjects = async () => {
     try {
@@ -177,59 +212,205 @@ export default function App() {
   const loadSubtopics = async (targetSubject = subject) => {
     if (!targetSubject || targetSubject === "All") {
       setSubtopics([]);
-      setSelectedSubtopic(null);
+      setSelectedSubtopicCodes([]);
       return;
     }
     try {
       const res = await fetch(`${API_URL}/subtopics?${buildQuery({ subject: targetSubject })}`);
       const data = await res.json();
       setSubtopics(Array.isArray(data.subtopics) ? data.subtopics : []);
-      setSelectedSubtopic(null);
+      setSelectedSubtopicCodes([]);
     } catch (err) {
       setStatus({ type: "error", message: "Could not load subtopics." });
     }
   };
 
-  useEffect(() => {
-    const loadFilters = async () => {
-      try {
-        const res = await fetch(`${API_URL}/questions/filters`);
-        const data = await res.json();
-        if (Array.isArray(data.categories) && data.categories.length > 0) {
-          setCategories(data.categories);
-        } else {
-          setCategories(defaultCategories);
-        }
-        if (Array.isArray(data.years) && data.years.length > 0) {
-          setYears(data.years);
-        } else {
-          setYears(fallbackYears);
-        }
-      } catch (err) {
-        setStatus({ type: "error", message: "Could not load filters from API." });
+  const loadCollections = async (targetSubject = subject) => {
+    try {
+      const query = targetSubject && targetSubject !== "All"
+        ? buildQuery({ subject: targetSubject })
+        : "";
+      const res = await fetch(`${API_URL}/collections${query ? `?${query}` : ""}`);
+      if (!res.ok) {
+        throw new Error("Could not load collections.");
       }
-    };
+      const data = await res.json();
+      const rows = Array.isArray(data.collections) ? data.collections : [];
+      setCollections(rows);
 
+      const validIds = new Set(rows.map((row) => Number(row.id)));
+      setSelectedCollectionIds((previous) =>
+        previous.filter((id) => validIds.has(Number(id)))
+      );
+      setCollectionForAddId((previous) => {
+        if (previous && validIds.has(Number(previous))) return previous;
+        return rows[0] ? String(rows[0].id) : "";
+      });
+    } catch (err) {
+      setStatus({ type: "error", message: "Could not load collections." });
+    }
+  };
+
+  const loadFilters = async () => {
+    try {
+      const res = await fetch(`${API_URL}/questions/filters`);
+      const data = await res.json();
+      if (Array.isArray(data.categories) && data.categories.length > 0) {
+        setCategories(data.categories);
+      } else {
+        setCategories(defaultCategories);
+      }
+      if (data.source_counts && typeof data.source_counts === "object") {
+        setSourceCounts({
+          scraped: Number(data.source_counts.scraped || 0),
+          uploaded: Number(data.source_counts.uploaded || 0),
+        });
+      }
+    } catch (err) {
+      setStatus({ type: "error", message: "Could not load filters from API." });
+    }
+  };
+
+  useEffect(() => {
     loadFilters();
     loadSubjects();
   }, []);
 
   useEffect(() => {
     loadSubtopics();
+    loadCollections();
   }, [subject]);
 
   useEffect(() => {
-    if (subject !== "All") {
-      loadQuestions();
+    if (subject === "All") {
+      setScrapedQuestions([]);
+      setUploadedQuestions([]);
+      setResultsPage(1);
+      return;
     }
-  }, [subject, selectedSubtopic]);
-  const filteredSubtopics = useMemo(() => {
-    const term = subtopicSearch.trim().toLowerCase();
-    if (!term) return subtopics;
-    return subtopics.filter((subtopic) =>
-      `${subtopic.code} ${subtopic.title}`.toLowerCase().includes(term)
-    );
-  }, [subtopics, subtopicSearch]);
+    loadQuestions();
+  }, [subject, category, questionType, selectedSubtopicCodes.join("|"), selectedCollectionIds.join("|")]);
+
+  useEffect(() => {
+    setResultsPage(1);
+  }, [resultsView, scrapedQuestions.length, uploadedQuestions.length]);
+
+  const themeGroups = useMemo(() => {
+    const groups = new Map();
+    const normalized = (subtopics || [])
+      .filter((item) => item?.code && item?.title)
+      .map((item) => ({ ...item, code: String(item.code).trim(), title: String(item.title).trim() }));
+
+    normalized.forEach((item) => {
+      if (!item.code || !item.title) return;
+      const isMainTheme = !item.code.includes(".");
+      const mainCode = isMainTheme ? item.code : item.code.split(".")[0];
+      if (!groups.has(mainCode)) {
+        groups.set(mainCode, { code: mainCode, title: "", subthemes: [] });
+      }
+      const group = groups.get(mainCode);
+      if (isMainTheme) {
+        group.title = item.title;
+      } else {
+        group.subthemes.push(item);
+      }
+    });
+
+    const finalGroups = Array.from(groups.values())
+      .map((group) => {
+        const sortedSubthemes = group.subthemes.sort((a, b) => compareCodes(a.code, b.code));
+        const fallbackTitle = sortedSubthemes[0]?.title
+          ? `Theme ${group.code}: ${sortedSubthemes[0].title}`
+          : `Theme ${group.code}`;
+        return {
+          ...group,
+          title: group.title || fallbackTitle,
+          subthemes: sortedSubthemes,
+        };
+      })
+      .sort((a, b) => compareCodes(a.code, b.code));
+
+    return finalGroups;
+  }, [subtopics]);
+
+  const selectedCodeSet = useMemo(() => new Set(selectedSubtopicCodes), [selectedSubtopicCodes]);
+
+  const toggleCodes = (codes, shouldSelect) => {
+    setSelectedSubtopicCodes((previous) => {
+      const next = new Set(previous);
+      codes.forEach((code) => {
+        if (shouldSelect) {
+          next.add(code);
+        } else {
+          next.delete(code);
+        }
+      });
+      return Array.from(next).sort(compareCodes);
+    });
+  };
+
+  const clearSubtopicSelection = () => setSelectedSubtopicCodes([]);
+  const selectedCollectionSet = useMemo(
+    () => new Set(selectedCollectionIds.map((id) => String(id))),
+    [selectedCollectionIds]
+  );
+
+  const toggleCollectionSelection = (collectionId, shouldSelect) => {
+    const stringId = String(collectionId);
+    setSelectedCollectionIds((previous) => {
+      const next = new Set(previous.map((value) => String(value)));
+      if (shouldSelect) {
+        next.add(stringId);
+      } else {
+        next.delete(stringId);
+      }
+      return Array.from(next);
+    });
+  };
+
+  const clearCollectionSelection = () => setSelectedCollectionIds([]);
+
+  const createCollection = async () => {
+    const name = newCollectionName.trim();
+    if (!name) {
+      setStatus({ type: "error", message: "Enter a collection name first." });
+      return;
+    }
+    if (subject === "All") {
+      setStatus({ type: "error", message: "Select a subject before creating a collection." });
+      return;
+    }
+    try {
+      const targetSubject = subject;
+      const res = await fetch(`${API_URL}/collections`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          subject: targetSubject,
+        }),
+      });
+      if (!res.ok) {
+        const detail = await res.text();
+        throw new Error(detail || "Could not create collection.");
+      }
+      const data = await res.json();
+      const createdCollection = data.collection;
+      setNewCollectionName("");
+      setStatus({
+        type: "success",
+        message: createdCollection?.created === false
+          ? `Collection "${createdCollection.name}" already exists.`
+          : `Created collection "${createdCollection?.name || name}".`,
+      });
+      await loadCollections(targetSubject);
+      if (createdCollection?.id) {
+        setCollectionForAddId(String(createdCollection.id));
+      }
+    } catch (err) {
+      setStatus({ type: "error", message: err.message || "Could not create collection." });
+    }
+  };
 
   const syncContext = async (overrides = {}) => {
     const subjectLabel =
@@ -241,9 +422,7 @@ export default function App() {
         overrides.category ?? (category === "All" ? CANONICAL_CATEGORY : category)
       ),
       subject: overrides.scraper_subject ?? overrides.subject ?? (subject === "All" ? "Economics" : subject),
-      year:
-        overrides.year ??
-        (year === "All" ? null : Number.isNaN(Number(year)) ? null : Number(year)),
+      year: overrides.year ?? null,
       document_type: "Exam Papers",
       pages: 2,
       subject_label: subjectLabel,
@@ -254,7 +433,7 @@ export default function App() {
       body: JSON.stringify(scraperConfig),
     });
     const payload = {
-      year: overrides.year ?? (Number(year) || new Date().getFullYear()),
+      year: overrides.year ?? 0,
       subject: overrides.subject ?? (subject === "All" ? "Economics" : subject),
       category: normalizeCategory(
         overrides.category ?? (category === "All" ? CANONICAL_CATEGORY : category)
@@ -262,6 +441,7 @@ export default function App() {
       question_type: overrides.question_type ?? questionType,
       source_link: overrides.source_link ?? "",
       document_name: overrides.document_name ?? document_name,
+      source_type: overrides.source_type ?? "scraped",
     };
     await fetch(`${API_URL}/context`, {
       method: "POST",
@@ -276,14 +456,20 @@ export default function App() {
   };
 
   const loadQuestions = async () => {
+    if (subject === "All") {
+      setScrapedQuestions([]);
+      setUploadedQuestions([]);
+      return;
+    }
     setIsLoading(true);
     setStatus({ type: "idle", message: "" });
     try {
       const params = {
         subject,
-        year,
         category,
-        subtopic: selectedSubtopic?.code,
+        question_type: questionType,
+        subtopics: selectedSubtopicCodes.join(","),
+        collections: selectedCollectionIds.join(","),
       };
       const res = await fetch(`${API_URL}/questions?${buildQuery(params)}`);
       if (!res.ok) {
@@ -291,8 +477,11 @@ export default function App() {
         throw new Error(detail || "Could not fetch questions.");
       }
       const data = await res.json();
-      setQuestions(Array.isArray(data.questions) ? data.questions : []);
-      setStatus({ type: "success", message: `Loaded ${data.questions?.length || 0} questions.` });
+      const scraped = Array.isArray(data.scraped_questions) ? data.scraped_questions : [];
+      const uploaded = Array.isArray(data.uploaded_questions) ? data.uploaded_questions : [];
+      setScrapedQuestions(scraped);
+      setUploadedQuestions(uploaded);
+      setStatus({ type: "success", message: `Loaded ${scraped.length + uploaded.length} questions.` });
     } catch (err) {
       setStatus({ type: "error", message: "Could not fetch questions." });
     } finally {
@@ -341,9 +530,19 @@ export default function App() {
         typeof resultObj.subject === "string" && resultObj.subject.trim().length > 0
           ? resultObj.subject.trim()
           : subject;
+      const cleanedSubtopics = Array.isArray(resultObj.subtopics)
+        ? resultObj.subtopics
+            .filter((item) => item?.code && item?.title)
+            .map((item) => ({
+              code: String(item.code).trim(),
+              title: String(item.title).trim(),
+            }))
+            .filter((item) => item.code && item.title)
+            .sort((a, b) => compareCodes(a.code, b.code))
+        : [];
       const payload = {
         subject: extractedSubject === "All" ? "Economics" : extractedSubject,
-        subtopics: resultObj.subtopics || [],
+        subtopics: cleanedSubtopics,
       };
 
       const subtopicRes = await fetch(`${API_URL}/subtopics/bulk`, {
@@ -367,7 +566,72 @@ export default function App() {
     }
   };
 
-  const runAiPipeline = async () => {
+  const pushContext = async (contextPayload) => {
+    await fetch(`${API_URL}/context`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(contextPayload),
+    });
+  };
+
+  const processDocumentPayloads = async (documentPayloads, label) => {
+    for (let index = 0; index < documentPayloads.length; index += 1) {
+      const { text, context } = documentPayloads[index] || {};
+      const contextPayload = context;
+
+      if (contextPayload?.document_name) {
+        setDocumentName(contextPayload.document_name);
+      }
+      if (contextPayload?.subject && subject === "All") {
+        setSubject(contextPayload.subject);
+      }
+      if (contextPayload?.category && category === "All") {
+        setCategory(contextPayload.category);
+      }
+      if (contextPayload) {
+        await pushContext(contextPayload);
+      }
+
+      const subjectForPrompt = contextPayload?.subject || (subject === "All" ? "" : subject);
+      const subtopicRes = subjectForPrompt
+        ? await fetch(`${API_URL}/subtopics?${buildQuery({ subject: subjectForPrompt })}`)
+        : null;
+      const subtopicData = subtopicRes ? await subtopicRes.json() : { subtopics: [] };
+      const subtopicLines = (subtopicData.subtopics || [])
+        .slice()
+        .sort((a, b) => compareCodes(a.code, b.code))
+        .map((item) => `${item.code} ${item.title}`)
+        .join("\n");
+
+      const prompt = `${basePrompt}\nSUBTOPICS (use exact match):\n${subtopicLines}\n\n${text}`;
+
+      setStatus({
+        type: "idle",
+        message: `Running ${label} extraction ${index + 1} of ${documentPayloads.length}...`,
+      });
+
+      const aiResponse = await window.puter.ai.chat(prompt, { model: MODEL });
+      const output =
+        typeof aiResponse === "string"
+          ? aiResponse
+          : aiResponse?.message?.content || aiResponse?.content || JSON.stringify(aiResponse);
+
+      const resultObj = parseAiJson(output);
+
+      const postRes = await fetch(`${API_URL}/ai-result`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ result: resultObj, context: contextPayload }),
+      });
+      if (!postRes.ok) {
+        const detail = await postRes.text();
+        throw new Error(detail || "Could not save AI result.");
+      }
+      await postRes.json();
+    }
+  };
+
+  const runScrapedAiPipeline = async () => {
     if (!window.puter?.ai?.chat) {
       setStatus({ type: "error", message: "Puter.js is not available." });
       return;
@@ -377,80 +641,179 @@ export default function App() {
     setStatus({ type: "idle", message: "" });
 
     try {
-      await syncContext();
+      await syncContext({ source_type: "scraped" });
       const dataRes = await fetch(`${API_URL}/data`);
       if (!dataRes.ok) {
         const detail = await dataRes.text();
-        throw new Error(detail || "Could not load document text.");
+        throw new Error(detail || "Could not load scraped document text.");
       }
       const dataPayload = await dataRes.json();
       const documentPayloads = Array.isArray(dataPayload.documents) && dataPayload.documents.length > 0
         ? dataPayload.documents
         : [{ text: dataPayload.text, context: dataPayload.context }];
 
-      for (let index = 0; index < documentPayloads.length; index += 1) {
-        const { text, context } = documentPayloads[index] || {};
-        const contextPayload = context;
-
-        if (contextPayload?.document_name) {
-          setDocumentName(contextPayload.document_name);
-        }
-        if (contextPayload?.subject && subject === "All") {
-          setSubject(contextPayload.subject);
-        }
-        if (contextPayload?.category && category === "All") {
-          setCategory(contextPayload.category);
-        }
-        if (typeof contextPayload?.year === "number" && year === "All") {
-          setYear(contextPayload.year > 0 ? String(contextPayload.year) : "All");
-        }
-        if (contextPayload) {
-          await syncContext(contextPayload);
-        }
-
-        const subjectForPrompt = contextPayload?.subject || (subject === "All" ? "" : subject);
-        const subtopicRes = subjectForPrompt
-          ? await fetch(`${API_URL}/subtopics?${buildQuery({ subject: subjectForPrompt })}`)
-          : null;
-        const subtopicData = subtopicRes ? await subtopicRes.json() : { subtopics: [] };
-        const subtopicLines = (subtopicData.subtopics || [])
-          .map((item) => `${item.code} ${item.title}`)
-          .join("\n");
-
-        const prompt = `${basePrompt}\nSUBTOPICS (use exact match):\n${subtopicLines}\n\n${text}`;
-
-        setStatus({
-          type: "idle",
-          message: `Running AI extraction ${index + 1} of ${documentPayloads.length}...`,
-        });
-
-        const aiResponse = await window.puter.ai.chat(prompt, { model: MODEL });
-        const output =
-          typeof aiResponse === "string"
-            ? aiResponse
-            : aiResponse?.message?.content || aiResponse?.content || JSON.stringify(aiResponse);
-
-        const resultObj = parseAiJson(output);
-
-        const postRes = await fetch(`${API_URL}/ai-result`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ result: resultObj, context: contextPayload }),
-        });
-        await postRes.json();
-      }
-
+      await processDocumentPayloads(documentPayloads, "scraped");
       setStatus({
         type: "success",
-        message: `AI pipeline complete: processed ${documentPayloads.length} document(s).`,
+        message: `Scraped extraction complete: processed ${documentPayloads.length} document(s).`,
       });
       await loadQuestions();
+      await loadFilters();
     } catch (err) {
-      setStatus({ type: "error", message: err.message || "Pipeline failed." });
+      setStatus({ type: "error", message: err.message || "Scraped pipeline failed." });
     } finally {
       setIsLoading(false);
     }
   };
+
+  const runUploadedAiPipeline = async () => {
+    if (!window.puter?.ai?.chat) {
+      setStatus({ type: "error", message: "Puter.js is not available." });
+      return;
+    }
+    if (questionUploadFiles.length === 0) {
+      setStatus({ type: "error", message: "Select at least one question PDF to upload." });
+      return;
+    }
+
+    setIsLoading(true);
+    setStatus({ type: "idle", message: "" });
+
+    try {
+      const formData = new FormData();
+      formData.append("subject", subject === "All" ? "Economics" : subject);
+      formData.append("category", category === "All" ? CANONICAL_CATEGORY : category);
+      questionUploadFiles.forEach((file) => {
+        formData.append("files", file);
+      });
+
+      const uploadRes = await fetch(`${API_URL}/uploads/question-documents/extract`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!uploadRes.ok) {
+        const detail = await uploadRes.text();
+        throw new Error(detail || "Could not extract uploaded document text.");
+      }
+
+      const uploadPayload = await uploadRes.json();
+      const documentPayloads = Array.isArray(uploadPayload.documents) && uploadPayload.documents.length > 0
+        ? uploadPayload.documents
+        : [{ text: uploadPayload.text, context: uploadPayload.context }];
+
+      await processDocumentPayloads(documentPayloads, "uploaded");
+      setStatus({
+        type: "success",
+        message: `Uploaded extraction complete: processed ${documentPayloads.length} document(s).`,
+      });
+      setQuestionUploadFiles([]);
+      await loadQuestions();
+      await loadFilters();
+    } catch (err) {
+      setStatus({ type: "error", message: err.message || "Uploaded pipeline failed." });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const addDocumentToCollection = async (question) => {
+    if (!collectionForAddId) {
+      setStatus({ type: "error", message: "Select a collection before adding documents." });
+      return;
+    }
+    if (!question?.document_name || !question?.subject || !question?.source_type) {
+      setStatus({ type: "error", message: "Missing document details for collection add." });
+      return;
+    }
+    try {
+      const res = await fetch(`${API_URL}/collections/documents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          collection_id: Number(collectionForAddId),
+          subject: question.subject,
+          source_type: question.source_type,
+          document_name: question.document_name,
+        }),
+      });
+      if (!res.ok) {
+        const detail = await res.text();
+        throw new Error(detail || "Could not add document to collection.");
+      }
+      const data = await res.json();
+      setStatus({
+        type: "success",
+        message: data.added
+          ? `Added "${question.document_name}" to collection.`
+          : `"${question.document_name}" is already in this collection.`,
+      });
+      await loadCollections(subject);
+      await loadQuestions();
+    } catch (err) {
+      setStatus({ type: "error", message: err.message || "Could not add document to collection." });
+    }
+  };
+
+  const renderQuestionCards = (questions, sourceLabel) =>
+    questions.map((question) => (
+      <article
+        key={`${sourceLabel}-${question.id}`}
+        className={`grid gap-3 rounded-xl border p-3 shadow-sm lg:grid-cols-[120px_minmax(0,1fr)] ${
+          sourceLabel === "scraped"
+            ? "border-amber-200 bg-amber-50/40"
+            : "border-sky-200 bg-sky-50/40"
+        }`}
+      >
+        <div className="space-y-2 text-xs uppercase tracking-wide text-slate-500">
+          <span className="block">{question.category}</span>
+          <span className="block">{question.question_type}</span>
+        </div>
+        <div>
+          <h3 className="text-sm font-semibold text-slate-900">
+            {question.document_name || "Untitled document"}
+          </h3>
+          <p className="mt-1 text-sm text-slate-700">{question.question_text}</p>
+          <div className="mt-2 flex flex-wrap gap-1.5 text-xs text-slate-500">
+            <span className="rounded-full bg-slate-100 px-2 py-1">{question.subject}</span>
+            <span
+              className={`rounded-full px-2 py-1 font-semibold ${
+                sourceLabel === "scraped"
+                  ? "bg-amber-200/60 text-amber-900"
+                  : "bg-sky-200/60 text-sky-900"
+              }`}
+            >
+              {sourceLabel === "scraped" ? "Scraped source" : "User upload"}
+            </span>
+            {question.source_link && (
+              <a className="rounded-full bg-amber-100 px-2 py-1" href={question.source_link}>
+                Source 🔗
+              </a>
+            )}
+            {Array.isArray(question.collections) && question.collections.length > 0 ? (
+              question.collections.map((collectionName) => (
+                <span
+                  key={`${question.id}-${collectionName}`}
+                  className="rounded-full bg-indigo-100 px-2 py-1 font-semibold text-indigo-800"
+                >
+                  {collectionName}
+                </span>
+              ))
+            ) : (
+              <span className="rounded-full bg-slate-200 px-2 py-1">No collection</span>
+            )}
+            <button
+              type="button"
+              onClick={() => addDocumentToCollection(question)}
+              className="rounded-full bg-emerald-100 px-2 py-1 font-semibold text-emerald-800 hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={!collectionForAddId}
+              title={collectionForAddId ? "Add this document to the selected collection" : "Select a collection first"}
+            >
+              Add To Collection
+            </button>
+          </div>
+        </div>
+      </article>
+    ));
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-amber-50 via-amber-100/40 to-slate-100 font-display text-slate-900">
@@ -494,47 +857,137 @@ export default function App() {
               </select>
             </div>
 
-            <div className="space-y-3">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-800">Subtopics</h2>
-                <label htmlFor="subtopic-search" className="sr-only">
-                  Search subtopics
-                </label>
+            <div className="space-y-2 rounded-xl border border-slate-200 bg-white/70 p-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-slate-800">Collections</h2>
+                <button
+                  type="button"
+                  onClick={clearCollectionSelection}
+                  className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                >
+                  Clear
+                </button>
+              </div>
+              <div className="flex gap-2">
                 <input
-                  id="subtopic-search"
-                  placeholder="Search subtopics"
-                  value={subtopicSearch}
-                  onChange={(event) => setSubtopicSearch(event.target.value)}
-                  className="mt-2 w-full rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                  value={newCollectionName}
+                  onChange={(event) => setNewCollectionName(event.target.value)}
+                  placeholder="New collection"
+                  className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-900 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
                 />
+                <button
+                  type="button"
+                  onClick={createCollection}
+                  className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700"
+                >
+                  Add
+                </button>
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="collection-add-target" className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Active Collection For Add
+                </label>
+                <select
+                  id="collection-add-target"
+                  value={collectionForAddId}
+                  onChange={(event) => setCollectionForAddId(event.target.value)}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-900 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                >
+                  <option value="">Select collection</option>
+                  {collections.map((collection) => (
+                    <option key={collection.id} value={collection.id}>
+                      {collection.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <p className="text-xs text-slate-500">{selectedCollectionIds.length} selected</p>
+                <div className="max-h-28 space-y-1 overflow-auto pr-1">
+                  {collections.map((collection) => (
+                    <label key={collection.id} className="flex items-start gap-2 text-sm text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={selectedCollectionSet.has(String(collection.id))}
+                        onChange={(event) => toggleCollectionSelection(collection.id, event.target.checked)}
+                        className="mt-0.5 h-4 w-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+                      />
+                      <span>
+                        {collection.name}
+                        <span className="ml-1 text-xs text-slate-500">({collection.documents_count || 0})</span>
+                      </span>
+                    </label>
+                  ))}
+                  {collections.length === 0 && (
+                    <p className="text-xs text-slate-500">No collections yet.</p>
+                  )}
+                </div>
               </div>
             </div>
 
-            <div className="flex-1 space-y-2 overflow-auto pr-1">
-              {filteredSubtopics.map((subtopic) => {
-                const isActive = selectedSubtopic?.id === subtopic.id;
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-slate-800">Chapters</h2>
+                <button
+                  type="button"
+                  onClick={clearSubtopicSelection}
+                  className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                >
+                  Clear
+                </button>
+              </div>
+              <p className="text-xs text-slate-500">
+                {selectedSubtopicCodes.length} selected
+              </p>
+            </div>
+
+            <div className="flex-1 space-y-3 overflow-auto pr-1">
+              {themeGroups.map((group) => {
+                const themeCodes = [group.code, ...group.subthemes.map((item) => item.code)];
+                const selectedCount = themeCodes.filter((code) => selectedCodeSet.has(code)).length;
+                const isChecked = themeCodes.length > 0 && selectedCount === themeCodes.length;
+                const isPartial = selectedCount > 0 && selectedCount < themeCodes.length;
+
                 return (
-                  <button
-                    type="button"
-                    key={subtopic.id}
-                    className={`w-full rounded-xl border px-3 py-2 text-left text-sm transition ${
-                      isActive
-                        ? "border-amber-300 bg-amber-50 shadow-sm"
-                        : "border-transparent bg-white hover:border-slate-200"
-                    }`}
-                    onClick={() => setSelectedSubtopic(subtopic)}
-                  >
-                    <span className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      {subtopic.code}
-                    </span>
-                    <span className="mt-1 block text-sm font-medium text-slate-900">
-                      {subtopic.title}
-                    </span>
-                  </button>
+                  <div key={group.code} className="rounded-xl border border-slate-200 bg-white p-3">
+                    <label className="flex items-start gap-2 text-sm font-semibold text-slate-800">
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        ref={(element) => {
+                          if (element) {
+                            element.indeterminate = isPartial;
+                          }
+                        }}
+                        onChange={(event) => toggleCodes(themeCodes, event.target.checked)}
+                        className="mt-0.5 h-4 w-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+                      />
+                      <span>{group.code} {group.title}</span>
+                    </label>
+
+                    <div className="mt-2 space-y-2 pl-6">
+                      {group.subthemes.map((subtheme) => (
+                        <label
+                          key={subtheme.id ?? subtheme.code}
+                          className="flex items-start gap-2 text-sm text-slate-700"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedCodeSet.has(subtheme.code)}
+                            onChange={(event) => toggleCodes([subtheme.code], event.target.checked)}
+                            className="mt-0.5 h-4 w-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+                          />
+                          <span>{subtheme.code} {subtheme.title}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
                 );
               })}
-              {filteredSubtopics.length === 0 && (
-                <p className="text-sm text-slate-500">No subtopics yet. Add them via the API.</p>
+              {themeGroups.length === 0 && (
+                <p className="text-sm text-slate-500">No themes yet. Extract them from the syllabus PDF.</p>
               )}
             </div>
           </aside>
@@ -599,26 +1052,45 @@ export default function App() {
               )}
             </section>
 
-            <section className="grid gap-4 rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm md:grid-cols-3">
-              <div className="space-y-2 text-sm">
-                <label htmlFor="year" className="font-semibold text-slate-800">
-                  Year
-                </label>
-                <select
-                  id="year"
-                  value={year}
-                  onChange={(event) => setYear(event.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
-                >
-                  <option value="All">All years</option>
-                  {years.map((value) => (
-                    <option key={value} value={value}>
-                      {value}
-                    </option>
-                  ))}
-                </select>
+            <section className="rounded-2xl border border-sky-200 bg-sky-50/40 p-6 shadow-sm">
+              <div>
+                <h3 className="text-lg font-semibold text-slate-900">
+                  Upload question documents
+                </h3>
+                <p className="mt-2 text-sm text-slate-600">
+                  Upload your own question PDFs and extract them into the user-uploaded table.
+                </p>
               </div>
+              <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-end">
+                <div className="flex-1 space-y-2">
+                  <label htmlFor="question-upload-files" className="text-sm font-medium text-slate-700">
+                    Question PDFs
+                  </label>
+                  <input
+                    id="question-upload-files"
+                    type="file"
+                    accept="application/pdf"
+                    multiple
+                    onChange={(event) => setQuestionUploadFiles(Array.from(event.target.files || []))}
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm file:mr-4 file:rounded-lg file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-sm file:font-semibold file:text-slate-700 hover:file:bg-slate-200 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                  />
+                </div>
+                <button
+                  className={`${accentButton} h-11`}
+                  onClick={runUploadedAiPipeline}
+                  disabled={isLoading}
+                >
+                  Extract uploaded docs
+                </button>
+              </div>
+              {questionUploadFiles.length > 0 && (
+                <p className="mt-3 text-xs text-slate-500">
+                  Selected {questionUploadFiles.length} file(s).
+                </p>
+              )}
+            </section>
 
+            <section className="grid gap-4 rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm md:grid-cols-2">
               <div className="space-y-2 text-sm">
                 <label htmlFor="category" className="font-semibold text-slate-800">
                   Category
@@ -658,105 +1130,83 @@ export default function App() {
             </section>
 
             <section className="flex flex-wrap gap-3">
-              {/*
-              <button
-                type="button"
-                className={secondaryButton}
-                onClick={syncContext}
-                disabled={isLoading}
-              >
-                Sync context
-              </button>
-              */}
-              <button
-                type="button"
-                className={primaryButton}
-                onClick={loadQuestions}
-                disabled={isLoading}
-              >
-                {isLoading ? "Loading..." : "Load questions"}
-              </button>
               <button
                 type="button"
                 className={accentButton}
-                onClick={runAiPipeline}
+                onClick={runScrapedAiPipeline}
                 disabled={isLoading}
               >
-                Extract
+                Extract scraped docs
               </button>
             </section>
 
             <section className="space-y-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-lg font-semibold text-slate-900">Results</h3>
-                <p className="text-xs uppercase tracking-wide text-slate-500">
-                  {questions.length} total
-                </p>
+                <div className="flex gap-2 text-xs uppercase tracking-wide text-slate-500">
+                  <span>{totalQuestions} loaded</span>
+                  <span>DB scraped: {sourceCounts.scraped}</span>
+                  <span>DB uploaded: {sourceCounts.uploaded}</span>
+                </div>
               </div>
-              <div className="space-y-4">
-                {questions.map((question) => (
-                  <article
-                    key={question.id}
-                    className="grid gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:grid-cols-[140px_minmax(0,1fr)_90px]"
-                  >
-                    
-                    <div className="space-y-2 text-xs uppercase tracking-wide text-slate-500">
-                      <span className="block">Year: {question.year}</span>
-                      <span className="block">{question.category}</span>
-                      <span className="block">{question.question_type}</span>
-                    </div>
-                    <div>
-                      <h3 className="text-base font-semibold text-slate-900">
-                        {question.document_name || "Untitled document"}
-                      </h3>
-                      <p className="mt-2 text-sm text-slate-700">{question.question_text}</p>
-                      <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
-                        <span className="rounded-full bg-slate-100 px-2 py-1">
-                          {question.subject}
-                        </span>
-                          {question.mark_scheme && (
-                            <a
-                              className="rounded-full bg-red-100 px-2 py-1"
-                              href={question.mark_scheme}
-                            >
-                              Mark Scheme
-                            </a>
-                        )}
-                        <a className="rounded-full bg-amber-100 px-2 py-1" href={question.source_link}>Source 🔗 </a>
-                      </div>
-                    </div>
-                    {/*
-                    <div className="flex items-center justify-start lg:justify-center">
-                      <div className="rounded-2xl bg-amber-50 px-4 py-3 text-center">
-                        <p className="text-lg font-semibold text-slate-900">
-                          {question.marks ?? "-"}
-                        </p>
-                        <p className="text-[10px] uppercase tracking-wide text-slate-500">
-                          marks
-                        </p>
-                      </div>
-                    </div>
-                    */}
-                  </article>
-                ))}
-                {questions.length === 0 && (
-                  <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-slate-300 bg-white/80 px-6 py-10 text-center">
-                    <p className="text-sm font-semibold text-slate-800">
-                      No questions yet. Pull a context or run extraction to populate results.
-                    </p>
-                    <p className="text-xs text-slate-500">
-                      Sync the context, load questions, or run the AI extraction pipeline.
-                    </p>
+              <div className="space-y-4 rounded-2xl border border-slate-200 bg-white/70 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1">
                     <button
                       type="button"
-                      className={accentButton}
-                      onClick={runAiPipeline}
-                      disabled={isLoading}
+                      onClick={() => setResultsView("scraped")}
+                      className={`rounded-lg px-3 py-1.5 text-sm font-semibold ${
+                        resultsView === "scraped"
+                          ? "bg-amber-100 text-amber-900"
+                          : "text-slate-600 hover:bg-slate-100"
+                      }`}
                     >
-                      Extract
+                      Scraped ({scrapedQuestions.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setResultsView("uploaded")}
+                      className={`rounded-lg px-3 py-1.5 text-sm font-semibold ${
+                        resultsView === "uploaded"
+                          ? "bg-sky-100 text-sky-900"
+                          : "text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      Uploaded ({uploadedQuestions.length})
                     </button>
                   </div>
-                )}
+
+                  <div className="flex items-center gap-2 text-xs text-slate-600">
+                    <button
+                      type="button"
+                      onClick={() => setResultsPage((previous) => Math.max(1, previous - 1))}
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 disabled:opacity-50"
+                      disabled={safeResultsPage <= 1}
+                    >
+                      Prev
+                    </button>
+                    <span>
+                      Page {safeResultsPage} / {totalResultPages}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setResultsPage((previous) => Math.min(totalResultPages, previous + 1))}
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 disabled:opacity-50"
+                      disabled={safeResultsPage >= totalResultPages}
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  {renderQuestionCards(pagedQuestions, displayedSourceLabel)}
+                  {displayedQuestions.length === 0 && (
+                    <p className="rounded-xl border border-dashed border-slate-300 bg-white px-4 py-3 text-sm text-slate-600">
+                      {displayedEmptyLabel}
+                    </p>
+                  )}
+                </div>
               </div>
             </section>
           </main>
