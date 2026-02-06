@@ -21,10 +21,18 @@ from uuid import uuid4
 
 app = FastAPI()
 
+def _parse_cors_origins() -> list[str]:
+    raw = os.environ.get(
+        "CORS_ORIGINS",
+        "http://localhost:5173,https://graili-app.onrender.com",
+    )
+    origins = [value.strip() for value in raw.split(",") if value.strip()]
+    return origins or ["http://localhost:5173", "https://graili-app.onrender.com"]
+
 # Enable CORS for frontend connection
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_parse_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -341,6 +349,10 @@ def download_question_papers_for_run(config: ScraperConfig) -> tuple[list[str], 
             documents = loop.run_until_complete(scraper.get_documents())
         finally:
             loop.close()
+    except Exception as exc:
+        error_message = f"{type(exc).__name__}: {exc}"
+        print("Scraper fetch error:", error_message)
+        raise HTTPException(status_code=500, detail=f"Scraper fetch failed: {error_message}") from exc
 
     if not documents:
         return [], TMP_DIR / "scraped_docs" / "empty"
@@ -349,11 +361,16 @@ def download_question_papers_for_run(config: ScraperConfig) -> tuple[list[str], 
 
     run_root = TMP_DIR / "scraped_docs" / uuid4().hex
     run_root.mkdir(parents=True, exist_ok=True)
-    scraper.download_documents(
-        documents,
-        download_root=str(run_root),
-        subject_label=subject_label,
-    )
+    try:
+        scraper.download_documents(
+            documents,
+            download_root=str(run_root),
+            subject_label=subject_label,
+        )
+    except Exception as exc:
+        error_message = f"{type(exc).__name__}: {exc}"
+        print("Scraper download error:", error_message)
+        raise HTTPException(status_code=500, detail=f"Scraper download failed: {error_message}") from exc
     files = find_question_papers(subject_label, run_root)
     return files, run_root
 
@@ -626,6 +643,12 @@ def get_data():
             "context": first_payload["context"],
             "documents": documents_payload,
         }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        error_message = f"{type(exc).__name__}: {exc}"
+        print("Data pipeline error:", error_message)
+        raise HTTPException(status_code=500, detail=f"Data extraction failed: {error_message}") from exc
     finally:
         if run_root and run_root.exists():
             shutil.rmtree(run_root, ignore_errors=True)
