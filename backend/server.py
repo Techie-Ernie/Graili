@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Literal
 from threading import Lock
 import os
+import shutil
+from uuid import uuid4
 
 app = FastAPI()
 
@@ -273,16 +275,16 @@ def build_prompt_payload(
     context_payload = context.model_dump() if hasattr(context, "model_dump") else context.dict()
     return {"text": str(prompts), "context": context_payload}
 
-def find_question_papers(subject: str) -> list[str]:
+def find_question_papers(subject: str, documents_root: Path = DOCUMENTS_ROOT) -> list[str]:
     subject_dir = safe_subject_name(subject)
-    base_dir = DOCUMENTS_ROOT / subject_dir
+    base_dir = documents_root / subject_dir
     files = glob.glob(str(base_dir / "question_paper" / "*.pdf"))
     if not files:
         files = glob.glob(str(base_dir / "question_papers" / "*.pdf"))
     if not files:
-        files = glob.glob(str(DOCUMENTS_ROOT / "*" / "question_paper" / "*.pdf"))
+        files = glob.glob(str(documents_root / "*" / "question_paper" / "*.pdf"))
     if not files:
-        files = glob.glob(str(DOCUMENTS_ROOT / "*" / "question_papers" / "*.pdf"))
+        files = glob.glob(str(documents_root / "*" / "question_papers" / "*.pdf"))
     return files
 
 def ensure_question_papers(config: ScraperConfig) -> list[str]:
@@ -318,6 +320,42 @@ def ensure_question_papers(config: ScraperConfig) -> list[str]:
             subject_label=subject_label,
         )
     return find_question_papers(subject_label)
+
+
+def download_question_papers_for_run(config: ScraperConfig) -> tuple[list[str], Path]:
+    subject_label = normalize_subject_label(config.subject_label or config.subject)
+    scraper_subject = derive_scraper_subject(config.subject)
+    scraper = HolyGrailScraper(
+        config.category,
+        scraper_subject,
+        config.year,
+        config.document_type,
+        pages=config.pages,
+    )
+
+    try:
+        documents = asyncio.run(scraper.get_documents())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            documents = loop.run_until_complete(scraper.get_documents())
+        finally:
+            loop.close()
+
+    if not documents:
+        return [], TMP_DIR / "scraped_docs" / "empty"
+
+    _update_document_cache(scraper.documents, config)
+
+    run_root = TMP_DIR / "scraped_docs" / uuid4().hex
+    run_root.mkdir(parents=True, exist_ok=True)
+    scraper.download_documents(
+        documents,
+        download_root=str(run_root),
+        subject_label=subject_label,
+    )
+    files = find_question_papers(subject_label, run_root)
+    return files, run_root
 
 def _upsert_question(model: type[Question] | type[UploadedQuestion], data: dict) -> None:
     if "subject" in data and data.get("subject"):
@@ -548,42 +586,49 @@ def test_connection():
 def get_data():
     with _scraper_config_lock:
         config = _scraper_config
-    files = ensure_question_papers(config)
-    if not files:
-        raise HTTPException(status_code=404, detail="No question papers found for this subject.")
-    document_cache = get_or_create_document_cache(config)
-    syllabus_text = load_syllabus_text(config.subject_label or config.subject)
+    files: list[str] = []
+    run_root: Optional[Path] = None
+    try:
+        files, run_root = download_question_papers_for_run(config)
+        if not files:
+            raise HTTPException(status_code=404, detail="No question papers found for this subject.")
 
-    def build_document_payload(file_path: str) -> dict:
-        model_prompt = extract_text_from_pdf_path(file_path)
-        document_name = Path(file_path).stem
-        cached = document_cache.get(document_name, {})
-        source_link = cached.get("source_link") or ""
-        cached_year = cached.get("year")
-        if cached_year is not None:
-            try:
-                cached_year = int(cached_year)
-            except (TypeError, ValueError):
-                cached_year = None
-        context = QuestionContext(
-            year=cached_year if cached_year is not None else normalize_year(config.year),
-            subject=config.subject_label or config.subject,
-            category=config.category,
-            question_type="exam",
-            source_link=source_link,
-            document_name=document_name,
-            source_type="scraped",
-        )
-        return build_prompt_payload(model_prompt, context, syllabus_text)
+        document_cache = _get_document_cache(config)
+        syllabus_text = load_syllabus_text(config.subject_label or config.subject)
 
-    documents_payload = [build_document_payload(path) for path in sorted(files)]
-    first_payload = documents_payload[0]
-    set_current_context(QuestionContext(**first_payload["context"]))
-    return {
-        "text": first_payload["text"],
-        "context": first_payload["context"],
-        "documents": documents_payload,
-    }
+        def build_document_payload(file_path: str) -> dict:
+            model_prompt = extract_text_from_pdf_path(file_path)
+            document_name = Path(file_path).stem
+            cached = document_cache.get(document_name, {})
+            source_link = cached.get("source_link") or ""
+            cached_year = cached.get("year")
+            if cached_year is not None:
+                try:
+                    cached_year = int(cached_year)
+                except (TypeError, ValueError):
+                    cached_year = None
+            context = QuestionContext(
+                year=cached_year if cached_year is not None else normalize_year(config.year),
+                subject=config.subject_label or config.subject,
+                category=config.category,
+                question_type="exam",
+                source_link=source_link,
+                document_name=document_name,
+                source_type="scraped",
+            )
+            return build_prompt_payload(model_prompt, context, syllabus_text)
+
+        documents_payload = [build_document_payload(path) for path in sorted(files)]
+        first_payload = documents_payload[0]
+        set_current_context(QuestionContext(**first_payload["context"]))
+        return {
+            "text": first_payload["text"],
+            "context": first_payload["context"],
+            "documents": documents_payload,
+        }
+    finally:
+        if run_root and run_root.exists():
+            shutil.rmtree(run_root, ignore_errors=True)
 
 
 @app.post("/uploads/question-documents/extract")
