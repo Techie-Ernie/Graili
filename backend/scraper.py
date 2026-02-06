@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 
 class HolyGrailScraper:
-    def __init__(self, category, subject, year=None, documentType="Exam Papers", pages=1, headless=False):
+    def __init__(self, category, subject, year=None, documentType="Exam Papers", pages=1, headless=True):
         self.category = category
         self.subject = subject
         self.documentType = documentType
