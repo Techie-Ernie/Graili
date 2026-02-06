@@ -8,6 +8,8 @@ const defaultCategories = [];
 const questionTypeOptions = ["exam", "understanding"];
 const CANONICAL_CATEGORY = "GCE 'A' Levels";
 const RESULTS_PAGE_SIZE = 8;
+const DEFAULT_SCRAPER_PAGES = 2;
+const MAX_SCRAPER_PAGES = 20;
 
 
 const basePrompt = `
@@ -148,6 +150,12 @@ function compareCodes(a, b) {
   return String(a).localeCompare(String(b));
 }
 
+function sanitizePageCount(value) {
+  const parsed = Number.parseInt(String(value), 10);
+  if (Number.isNaN(parsed) || parsed < 1) return 1;
+  return Math.min(parsed, MAX_SCRAPER_PAGES);
+}
+
 export default function App() {
   const [subjects, setSubjects] = useState([]);
   const [subject, setSubject] = useState("All");
@@ -162,6 +170,7 @@ export default function App() {
   const [category, setCategory] = useState("All");
   const [document_name, setDocumentName] = useState("Document Name");
   const [questionType, setQuestionType] = useState(questionTypeOptions[0]);
+  const [scraperPages, setScraperPages] = useState(DEFAULT_SCRAPER_PAGES);
   const [syllabusFile, setSyllabusFile] = useState(null);
   const [questionUploadFiles, setQuestionUploadFiles] = useState([]);
 
@@ -424,7 +433,7 @@ export default function App() {
       subject: overrides.scraper_subject ?? overrides.subject ?? (subject === "All" ? "Economics" : subject),
       year: overrides.year ?? null,
       document_type: "Exam Papers",
-      pages: 2,
+      pages: sanitizePageCount(overrides.pages ?? scraperPages),
       subject_label: subjectLabel,
     };
     await fetch(`${API_URL}/scraper/config`, {
@@ -1090,7 +1099,7 @@ export default function App() {
               )}
             </section>
 
-            <section className="grid gap-4 rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm md:grid-cols-2">
+            <section className="grid gap-4 rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm md:grid-cols-3">
               <div className="space-y-2 text-sm">
                 <label htmlFor="category" className="font-semibold text-slate-800">
                   Category
@@ -1127,6 +1136,25 @@ export default function App() {
                   ))}
                 </select>
               </div>
+
+              <div className="space-y-2 text-sm">
+                <label htmlFor="scraperPages" className="font-semibold text-slate-800">
+                  Scraper pages
+                </label>
+                <input
+                  id="scraperPages"
+                  type="number"
+                  min={1}
+                  max={MAX_SCRAPER_PAGES}
+                  step={1}
+                  value={scraperPages}
+                  onChange={(event) => setScraperPages(sanitizePageCount(event.target.value))}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                />
+                <p className="text-xs text-slate-500">
+                  Number of Grail result pages to scrape (1-{MAX_SCRAPER_PAGES}).
+                </p>
+              </div>
             </section>
 
             <section className="flex flex-wrap gap-3">
@@ -1136,7 +1164,7 @@ export default function App() {
                 onClick={runScrapedAiPipeline}
                 disabled={isLoading}
               >
-                Extract scraped docs
+                Scrape Documents
               </button>
             </section>
 
