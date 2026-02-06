@@ -193,6 +193,7 @@ export default function App() {
   const [sourceCounts, setSourceCounts] = useState({ scraped: 0, uploaded: 0 });
   const [status, setStatus] = useState({ type: "idle", message: "" });
   const [isLoading, setIsLoading] = useState(false);
+  const [isScrapingDocs, setIsScrapingDocs] = useState(false);
   const [clientSessionId] = useState(() => getOrCreateClientSessionId());
 
   const apiFetch = (url, options = {}) => {
@@ -676,12 +677,15 @@ export default function App() {
 
     try {
       await syncContext({ source_type: "scraped" });
+      setIsScrapingDocs(true);
+      setStatus({ type: "idle", message: "Scraping and downloading documents..." });
       const dataRes = await apiFetch(`${API_URL}/data`);
       if (!dataRes.ok) {
         const detail = await dataRes.text();
         throw new Error(detail || "Could not load scraped document text.");
       }
       const dataPayload = await dataRes.json();
+      setIsScrapingDocs(false);
       const documentPayloads = Array.isArray(dataPayload.documents) && dataPayload.documents.length > 0
         ? dataPayload.documents
         : [{ text: dataPayload.text, context: dataPayload.context }];
@@ -696,6 +700,7 @@ export default function App() {
     } catch (err) {
       setStatus({ type: "error", message: err.message || "Scraped pipeline failed." });
     } finally {
+      setIsScrapingDocs(false);
       setIsLoading(false);
     }
   };
@@ -1266,6 +1271,22 @@ export default function App() {
           </main>
         </div>
       </div>
+
+      {isScrapingDocs && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex items-center gap-3">
+              <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-slate-300 border-t-emerald-600" />
+              <div>
+                <p className="text-sm font-semibold text-slate-900">Scraping documents...</p>
+                <p className="mt-1 text-xs text-slate-600">
+                  Fetching and downloading papers from Grail. This can take a while.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
