@@ -98,42 +98,85 @@ DOCUMENTS_ROOT = Path(os.environ.get("DOCUMENTS_ROOT", str(PROJECT_ROOT / "docum
 SYLLABI_DIR = Path(os.environ.get("SYLLABI_DIR", str(PROJECT_ROOT / "syllabi")))
 TMP_DIR = Path(os.environ.get("TMP_DIR", str(PROJECT_ROOT / "tmp")))
 
-SUBJECT_CODE_MAP = {
-    "Economics (Syllabus 9750)": "H2 Economics",
-    "Economics (9750)": "H2 Economics",
-    "Economics": "H2 Economics",
-}
-
-SUBJECT_LABEL_CANONICAL = {
-    "Economics": "Economics (Syllabus 9750)",
-    "Economics (9750)": "Economics (Syllabus 9750)",
-    "Economics (Syllabus 9750)": "Economics (Syllabus 9750)",
-}
-
-
 @app.on_event("startup")
 def initialize_schema() -> None:
     create_schema()
 
-def normalize_subject_label(subject: str) -> str:
-    cleaned = " ".join(subject.split())
-    canonical = SUBJECT_LABEL_CANONICAL.get(cleaned)
-    if canonical:
-        return canonical
-    if "(" in cleaned and "Syllabus" not in cleaned:
-        cleaned = cleaned.replace("(", "(Syllabus ")
-    return cleaned
+_SUBJECT_CODE_PAREN_RE = re.compile(
+    r"^(?P<name>.*?)\s*\(\s*(?:Syllabus\s*)?(?P<code>\d{4})\s*\)\s*$",
+    flags=re.IGNORECASE,
+)
 
-def derive_scraper_subject(subject: str) -> str:
-    subject = normalize_subject_label(subject)
-    mapped = SUBJECT_CODE_MAP.get(subject)
-    if mapped:
-        return mapped
-    if "(Syllabus" in subject:
-        base = subject.split(" (", 1)[0].strip()
-        if base:
-            return f"H2 {base}"
-    return subject
+
+def _lookup_canonical_subject_by_base(subject_base: str) -> Optional[str]:
+    base = " ".join(str(subject_base).split()).strip()
+    if not base:
+        return None
+
+    # Resolve "Economics" -> "Economics (Syllabus 9750)" (or similar) if we can find a unique match.
+    # We intentionally avoid hardcoded maps and derive from the subtopics table.
+    with Session(engine) as session:
+        rows = session.execute(select(Subtopic.subject).distinct()).all()
+
+    candidates: set[str] = set()
+    for (value,) in rows:
+        if not value:
+            continue
+        cleaned = " ".join(str(value).split()).strip()
+        cleaned_base = cleaned.split(" (", 1)[0].strip()
+        if cleaned_base.lower() == base.lower():
+            candidates.add(cleaned)
+
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    return None
+
+
+def normalize_subject_label(subject: Optional[str]) -> str:
+    if subject is None:
+        return ""
+    cleaned = " ".join(str(subject).split()).strip()
+    if not cleaned:
+        return ""
+
+    # Standardize "(9750)" / "(Syllabus9750)" / "(Syllabus 9750)" -> "(Syllabus 9750)".
+    match = _SUBJECT_CODE_PAREN_RE.match(cleaned)
+    if match:
+        name = match.group("name").strip()
+        code = match.group("code").strip()
+        if name and code:
+            return f"{name} (Syllabus {code})"
+
+    cleaned = re.sub(
+        r"\(\s*Syllabus\s*(\d{4})\s*\)",
+        r"(Syllabus \1)",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    resolved = _lookup_canonical_subject_by_base(cleaned)
+    return resolved or cleaned
+
+def derive_scraper_subject(subject: Optional[str]) -> str:
+    cleaned = normalize_subject_label(subject)
+    cleaned = " ".join(cleaned.split()).strip()
+    if not cleaned:
+        return ""
+
+    # If user already passed a Grail-format subject (e.g. "H2 Economics"), normalize it.
+    if re.match(r"^H[123]\s+", cleaned, flags=re.IGNORECASE):
+        parts = cleaned.split(None, 1)
+        if len(parts) == 1:
+            return parts[0].upper()
+        base = parts[1].split(" (", 1)[0].strip()
+        return f"{parts[0].upper()} {base}" if base else parts[0].upper()
+
+    base = cleaned.split(" (", 1)[0].strip()
+    if not base:
+        return cleaned
+
+    prefix = (os.environ.get("SCRAPER_SUBJECT_PREFIX", "H2") or "H2").strip().upper()
+    return f"{prefix} {base}"
 
 
 
@@ -373,13 +416,33 @@ def download_question_papers_for_run(config: ScraperConfig) -> tuple[list[str], 
     if not documents:
         return [], TMP_DIR / "scraped_docs" / "empty"
 
+    def looks_like_answer_key(name: Optional[str]) -> bool:
+        if not name:
+            return False
+        lowered = str(name).strip().replace(" ", "").lower()
+        tokens = (
+            "markscheme",
+            "answerkey",
+            "answersheet",
+            "suggestedanswers",
+            "examinersreport",
+        )
+        return any(token in lowered for token in tokens)
+
+    question_documents = {link: name for link, name in documents.items() if not looks_like_answer_key(name)}
+    if not question_documents:
+        raise HTTPException(
+            status_code=404,
+            detail="No question papers found (results look like answer keys/mark schemes). Try increasing pages or adjusting filters.",
+        )
+
     _update_document_cache(scraper.documents, config)
 
     run_root = TMP_DIR / "scraped_docs" / uuid4().hex
     run_root.mkdir(parents=True, exist_ok=True)
     try:
         scraper.download_documents(
-            documents,
+            question_documents,
             download_root=str(run_root),
             subject_label=subject_label,
         )
@@ -388,6 +451,18 @@ def download_question_papers_for_run(config: ScraperConfig) -> tuple[list[str], 
         print("Scraper download error:", error_message)
         raise HTTPException(status_code=500, detail=f"Scraper download failed: {error_message}") from exc
     files = find_question_papers(subject_label, run_root)
+    if not files:
+        # Provide a more actionable error when classification drops everything into answer_key.
+        subject_dir = safe_subject_name(subject_label)
+        any_pdfs = list((run_root / subject_dir).rglob("*.pdf"))
+        if any_pdfs:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Downloaded {len(any_pdfs)} PDF(s) but none were classified as question papers. "
+                    "They may have been detected as answer keys/mark schemes."
+                ),
+            )
     return files, run_root
 
 def _upsert_question(model: type[Question] | type[UploadedQuestion], data: dict) -> None:
@@ -588,9 +663,10 @@ def get_current_context() -> Optional[QuestionContext]:
 def refresh_context_from_scraper() -> QuestionContext:
     with _scraper_config_lock:
         config = _scraper_config
+    scraper_subject = derive_scraper_subject(config.subject)
     scraper = HolyGrailScraper(
         config.category,
-        config.subject,
+        scraper_subject,
         config.year,
         config.document_type,
         pages=config.pages,

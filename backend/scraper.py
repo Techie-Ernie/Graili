@@ -5,6 +5,7 @@ import os
 import pymupdf
 import shutil 
 from pathlib import Path
+import re
 
 class HolyGrailScraper:
     def __init__(self, category, subject, year=None, documentType="Exam Papers", pages=1, headless=True):
@@ -130,6 +131,20 @@ class HolyGrailScraper:
         question_dir = f"{download_dir}/question_paper"
         os.makedirs(ans_dir, exist_ok=True)
         os.makedirs(question_dir, exist_ok=True)
+
+        answer_key_patterns = [
+            re.compile(r"\bmark\s*scheme\b", flags=re.IGNORECASE),
+            re.compile(r"\banswer\s*key\b", flags=re.IGNORECASE),
+            re.compile(r"\banswer\s*sheet\b", flags=re.IGNORECASE),
+            re.compile(r"\bsuggested\s*answers?\b", flags=re.IGNORECASE),
+            re.compile(r"\bexaminers?\s*report\b", flags=re.IGNORECASE),
+        ]
+
+        def looks_like_answer_key(text: str) -> bool:
+            if not text:
+                return False
+            return any(pattern.search(text) for pattern in answer_key_patterns)
+
         for link, document_name in documents.items():
             self.set_current_document(link, document_name)
             document_name = document_name + ".pdf"
@@ -139,19 +154,27 @@ class HolyGrailScraper:
                     cwd=download_dir,
                     check=False
                 )
-                pdf = pymupdf.open(f"{download_dir}/{document_name}")
-                ans = ['markscheme', 'answerkey', 'answersheet', "suggestedanswers", "examinersreport", "examiners'report", "ans", "ms", "markscheme"]
-                if any(word in pdf[0].get_text().strip().replace(' ', '').lower() for word in ans) or any(word in document_name.strip().replace(' ', '').lower() for word in ans):
+                file_path = f"{download_dir}/{document_name}"
+                try:
+                    pdf = pymupdf.open(file_path)
+                    first_page_text = pdf[0].get_text() if pdf.page_count else ""
+                finally:
+                    try:
+                        pdf.close()
+                    except Exception:
+                        pass
+
+                if looks_like_answer_key(document_name) or looks_like_answer_key(first_page_text):
                     # check if file is answer key using the file name or first page of pdf 
                     # maybe can remove first page check? but it barely adds any latency
                     os.makedirs(ans_dir, exist_ok=True)
                     target_path = f"{ans_dir}/{document_name}"
-                    shutil.move(f"{download_dir}/{document_name}", target_path)
+                    shutil.move(file_path, target_path)
                 else:
                     print('question paper')
                     os.makedirs(question_dir, exist_ok=True)
                     target_path = f"{question_dir}/{document_name}"
-                    shutil.move(f"{download_dir}/{document_name}", target_path)
+                    shutil.move(file_path, target_path)
             else:
                 print(f"Document {document_name} already downloaded")
         

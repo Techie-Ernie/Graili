@@ -196,6 +196,7 @@ export default function App() {
   const [status, setStatus] = useState({ type: "idle", message: "" });
   const [isLoading, setIsLoading] = useState(false);
   const [isScrapingDocs, setIsScrapingDocs] = useState(false);
+  const [extractionProgress, setExtractionProgress] = useState(null);
   const [clientSessionId] = useState(() => getOrCreateClientSessionId());
 
   const apiFetch = (url, options = {}) => {
@@ -624,62 +625,80 @@ export default function App() {
   };
 
   const processDocumentPayloads = async (documentPayloads, label) => {
-    for (let index = 0; index < documentPayloads.length; index += 1) {
-      const { text, context } = documentPayloads[index] || {};
-      const contextPayload = {
-        ...(context || {}),
-        client_session_id: clientSessionId,
-      };
+    const total = documentPayloads.length;
+    setExtractionProgress({
+      label,
+      current: 0,
+      total,
+      document_name: "",
+    });
+    try {
+      for (let index = 0; index < documentPayloads.length; index += 1) {
+        const { text, context } = documentPayloads[index] || {};
+        const contextPayload = {
+          ...(context || {}),
+          client_session_id: clientSessionId,
+        };
 
-      if (contextPayload?.document_name) {
-        setDocumentName(contextPayload.document_name);
+        setExtractionProgress((previous) => ({
+          label,
+          current: index + 1,
+          total,
+          document_name: contextPayload?.document_name || previous?.document_name || "",
+        }));
+
+        if (contextPayload?.document_name) {
+          setDocumentName(contextPayload.document_name);
+        }
+        if (contextPayload?.subject && subject === "All") {
+          setSubject(contextPayload.subject);
+        }
+        if (contextPayload?.category && category === "All") {
+          setCategory(contextPayload.category);
+        }
+        if (contextPayload) {
+          await pushContext(contextPayload);
+        }
+
+        const subjectForPrompt = contextPayload?.subject || (subject === "All" ? "" : subject);
+        const subtopicRes = subjectForPrompt
+          ? await apiFetch(`${API_URL}/subtopics?${buildQuery({ subject: subjectForPrompt })}`)
+          : null;
+        const subtopicData = subtopicRes ? await subtopicRes.json() : { subtopics: [] };
+        const subtopicLines = (subtopicData.subtopics || [])
+          .slice()
+          .sort((a, b) => compareCodes(a.code, b.code))
+          .map((item) => `${item.code} ${item.title}`)
+          .join("\n");
+
+        const prompt = `${basePrompt}\nSUBTOPICS (use exact match):\n${subtopicLines}\n\n${text}`;
+
+        setStatus({
+          type: "idle",
+          message: `Running ${label} extraction ${index + 1} of ${documentPayloads.length}...`,
+        });
+
+        const aiResponse = await window.puter.ai.chat(prompt, { model: MODEL });
+        const output =
+          typeof aiResponse === "string"
+            ? aiResponse
+            : aiResponse?.message?.content || aiResponse?.content || JSON.stringify(aiResponse);
+
+        const resultObj = parseAiJson(output);
+
+        const postRes = await apiFetch(`${API_URL}/ai-result`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ result: resultObj, context: contextPayload }),
+        });
+        if (!postRes.ok) {
+          const detail = await postRes.text();
+          throw new Error(detail || "Could not save AI result.");
+        }
+        await postRes.json();
       }
-      if (contextPayload?.subject && subject === "All") {
-        setSubject(contextPayload.subject);
-      }
-      if (contextPayload?.category && category === "All") {
-        setCategory(contextPayload.category);
-      }
-      if (contextPayload) {
-        await pushContext(contextPayload);
-      }
-
-      const subjectForPrompt = contextPayload?.subject || (subject === "All" ? "" : subject);
-      const subtopicRes = subjectForPrompt
-        ? await apiFetch(`${API_URL}/subtopics?${buildQuery({ subject: subjectForPrompt })}`)
-        : null;
-      const subtopicData = subtopicRes ? await subtopicRes.json() : { subtopics: [] };
-      const subtopicLines = (subtopicData.subtopics || [])
-        .slice()
-        .sort((a, b) => compareCodes(a.code, b.code))
-        .map((item) => `${item.code} ${item.title}`)
-        .join("\n");
-
-      const prompt = `${basePrompt}\nSUBTOPICS (use exact match):\n${subtopicLines}\n\n${text}`;
-
-      setStatus({
-        type: "idle",
-        message: `Running ${label} extraction ${index + 1} of ${documentPayloads.length}...`,
-      });
-
-      const aiResponse = await window.puter.ai.chat(prompt, { model: MODEL });
-      const output =
-        typeof aiResponse === "string"
-          ? aiResponse
-          : aiResponse?.message?.content || aiResponse?.content || JSON.stringify(aiResponse);
-
-      const resultObj = parseAiJson(output);
-
-      const postRes = await apiFetch(`${API_URL}/ai-result`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ result: resultObj, context: contextPayload }),
-      });
-      if (!postRes.ok) {
-        const detail = await postRes.text();
-        throw new Error(detail || "Could not save AI result.");
-      }
-      await postRes.json();
+    } finally {
+      setExtractionProgress(null);
     }
   };
 
@@ -1332,6 +1351,42 @@ export default function App() {
                   Fetching and downloading papers from Grail. This can take a while.
                 </p>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!isScrapingDocs && extractionProgress && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="space-y-3">
+              <div>
+                <p className="text-sm font-semibold text-slate-900">
+                  Running {extractionProgress.label} extraction...
+                </p>
+                <p className="mt-1 text-xs text-slate-600">
+                  Processing document {extractionProgress.current} / {extractionProgress.total}
+                  {extractionProgress.document_name ? `: ${extractionProgress.document_name}` : ""}
+                </p>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+                <div
+                  className="h-2 rounded-full bg-emerald-600 transition-[width]"
+                  style={{
+                    width: `${
+                      extractionProgress.total > 0
+                        ? Math.min(
+                            100,
+                            Math.round((extractionProgress.current / extractionProgress.total) * 100)
+                          )
+                        : 0
+                    }%`,
+                  }}
+                />
+              </div>
+              <p className="text-xs text-slate-500">
+                This runs one document at a time (AI call + save). Keep this tab open.
+              </p>
             </div>
           </div>
         </div>
