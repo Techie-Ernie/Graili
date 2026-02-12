@@ -157,6 +157,13 @@ function sanitizePageCount(value) {
   return Math.min(parsed, MAX_SCRAPER_PAGES);
 }
 
+function getCurrentPage() {
+  if (typeof window === "undefined") return "user";
+  const hashPath = (window.location.hash || "").replace(/^#/, "");
+  const path = hashPath || window.location.pathname || "/";
+  return path === "/admin" ? "admin" : "user";
+}
+
 function getOrCreateClientSessionId() {
   if (typeof window === "undefined") return "server-session";
   const existing = window.sessionStorage.getItem(CLIENT_SESSION_STORAGE_KEY);
@@ -169,6 +176,7 @@ function getOrCreateClientSessionId() {
 }
 
 export default function App() {
+  const [currentPage, setCurrentPage] = useState(() => getCurrentPage());
   const [subjects, setSubjects] = useState([]);
   const [subject, setSubject] = useState("All");
   const [subtopics, setSubtopics] = useState([]);
@@ -198,6 +206,7 @@ export default function App() {
   const [isScrapingDocs, setIsScrapingDocs] = useState(false);
   const [extractionProgress, setExtractionProgress] = useState(null);
   const [clientSessionId] = useState(() => getOrCreateClientSessionId());
+  const isAdminPage = currentPage === "admin";
 
   const apiFetch = (url, options = {}) => {
     const headers = new Headers(options.headers || {});
@@ -308,6 +317,16 @@ export default function App() {
   useEffect(() => {
     loadFilters();
     loadSubjects();
+  }, []);
+
+  useEffect(() => {
+    const handleRouteChange = () => setCurrentPage(getCurrentPage());
+    window.addEventListener("hashchange", handleRouteChange);
+    window.addEventListener("popstate", handleRouteChange);
+    return () => {
+      window.removeEventListener("hashchange", handleRouteChange);
+      window.removeEventListener("popstate", handleRouteChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -908,6 +927,26 @@ export default function App() {
         />
       </div>
       <div className="relative z-10 mx-auto w-full max-w-7xl px-4 py-6 lg:px-6 lg:py-8">
+        <div className="mb-4 flex justify-end">
+          <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1 text-sm shadow-sm">
+            <a
+              href="/"
+              className={`rounded-lg px-3 py-1.5 font-semibold ${
+                !isAdminPage ? "bg-amber-100 text-amber-900" : "text-slate-600 hover:bg-slate-100"
+              }`}
+            >
+              User
+            </a>
+            <a
+              href="/#/admin"
+              className={`rounded-lg px-3 py-1.5 font-semibold ${
+                isAdminPage ? "bg-rose-100 text-rose-900" : "text-slate-600 hover:bg-slate-100"
+              }`}
+            >
+              Admin
+            </a>
+          </div>
+        </div>
         <div className="grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
           <aside className="order-2 flex flex-col gap-6 rounded-2xl border border-slate-200 bg-slate-100/80 p-5 shadow-sm lg:order-1 lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)]">
             <div className="flex items-center gap-4">
@@ -1077,11 +1116,12 @@ export default function App() {
               <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <div>
                   <h2 className="mt-2 text-3xl font-semibold text-slate-900">
-                    Curate the question bank
+                    {isAdminPage ? "Admin console" : "Curate the question bank"}
                   </h2>
                   <p className="mt-2 text-sm text-slate-600">
-                    Select a context, sync it to the backend, then run extraction or load
-                    matching questions.
+                    {isAdminPage
+                      ? "Run manual chapter seeding and Grail scraping jobs."
+                      : "Upload question documents, apply filters, and load matching results."}
                   </p>
                 </div>
                 <div className="flex items-start lg:justify-end">
@@ -1097,40 +1137,84 @@ export default function App() {
               </div>
             </section>
 
-            <section className="rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm">
-              <div>
-                <h3 className="text-lg font-semibold text-slate-900">
-                  Seed chapters from syllabus
-                </h3>
-                <p className="mt-2 text-sm text-slate-600">
-                  Upload the syllabus PDF for the selected subject to extract the subtopics.
-                </p>
-              </div>
-              <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-end">
-                <div className="flex-1 space-y-2">
-                  <label htmlFor="syllabus-file" className="text-sm font-medium text-slate-700">
-                    Syllabus PDF
-                  </label>
-                  <input
-                    id="syllabus-file"
-                    type="file"
-                    accept="application/pdf"
-                    onChange={(event) => setSyllabusFile(event.target.files?.[0] || null)}
-                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm file:mr-4 file:rounded-lg file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-sm file:font-semibold file:text-slate-700 hover:file:bg-slate-200 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
-                  />
+            {isAdminPage && (
+              <section className="rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm">
+                <div>
+                  <h3 className="text-lg font-semibold text-slate-900">
+                    Seed chapters from syllabus
+                  </h3>
+                  <p className="mt-2 text-sm text-slate-600">
+                    Upload the syllabus PDF for the selected subject to extract subtopics.
+                  </p>
                 </div>
-                <button
-                  className={`${primaryButton} h-11`}
-                  onClick={extractSubtopicsFromSyllabus}
-                  disabled={isLoading}
-                >
-                  Extract subtopics
-                </button>
-              </div>
-              {syllabusFile && (
-                <p className="mt-3 text-xs text-slate-500">Selected: {syllabusFile.name}</p>
-              )}
-            </section>
+                <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-end">
+                  <div className="flex-1 space-y-2">
+                    <label htmlFor="syllabus-file" className="text-sm font-medium text-slate-700">
+                      Syllabus PDF
+                    </label>
+                    <input
+                      id="syllabus-file"
+                      type="file"
+                      accept="application/pdf"
+                      onChange={(event) => setSyllabusFile(event.target.files?.[0] || null)}
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm file:mr-4 file:rounded-lg file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-sm file:font-semibold file:text-slate-700 hover:file:bg-slate-200 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                    />
+                  </div>
+                  <button
+                    className={`${primaryButton} h-11`}
+                    onClick={extractSubtopicsFromSyllabus}
+                    disabled={isLoading}
+                  >
+                    Extract subtopics
+                  </button>
+                </div>
+                {syllabusFile && (
+                  <p className="mt-3 text-xs text-slate-500">Selected: {syllabusFile.name}</p>
+                )}
+              </section>
+            )}
+
+            {isAdminPage && (
+              <section className="rounded-2xl border border-amber-200 bg-amber-50/40 p-6 shadow-sm">
+                <div>
+                  <h3 className="text-lg font-semibold text-slate-900">
+                    Scrape Grail documents
+                  </h3>
+                  <p className="mt-2 text-sm text-slate-600">
+                    Manually scrape Grail papers for the selected subject and extract questions.
+                  </p>
+                </div>
+                <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-end">
+                  <div className="w-full space-y-2 lg:max-w-xs">
+                    <label htmlFor="scraperPages" className="text-sm font-medium text-slate-700">
+                      Scraper pages
+                    </label>
+                    <input
+                      id="scraperPages"
+                      type="number"
+                      min={1}
+                      max={MAX_SCRAPER_PAGES}
+                      step={1}
+                      value={scraperPages}
+                      onChange={(event) => setScraperPages(sanitizePageCount(event.target.value))}
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                    />
+                    <p className="text-xs text-slate-500">
+                      Number of result pages to scrape (1-{MAX_SCRAPER_PAGES}).
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className={accentButton}
+                    onClick={runScrapedAiPipeline}
+                    disabled={isLoading || subject === "All"}
+                    title={subject === "All" ? "Select a subject first" : "Run manual Grail scrape"}
+                  >
+                    Scrape Grail
+                  </button>
+                </div>
+              </section>
+            )}
 
             <section className="rounded-2xl border border-sky-200 bg-sky-50/40 p-6 shadow-sm">
               <div>
@@ -1170,7 +1254,7 @@ export default function App() {
               )}
             </section>
 
-            <section className="grid gap-4 rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm md:grid-cols-4">
+            <section className="grid gap-4 rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm md:grid-cols-3">
               <div className="space-y-2 text-sm">
                 <label htmlFor="category" className="font-semibold text-slate-800">
                   Category
@@ -1235,36 +1319,6 @@ export default function App() {
                 </p>
               </div>
 
-              <div className="space-y-2 text-sm">
-                <label htmlFor="scraperPages" className="font-semibold text-slate-800">
-                  Scraper pages
-                </label>
-                <input
-                  id="scraperPages"
-                  type="number"
-                  min={1}
-                  max={MAX_SCRAPER_PAGES}
-                  step={1}
-                  value={scraperPages}
-                  onChange={(event) => setScraperPages(sanitizePageCount(event.target.value))}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
-                />
-                <p className="text-xs text-slate-500">
-                  Number of Grail result pages to scrape (1-{MAX_SCRAPER_PAGES}).
-                </p>
-              </div>
-            </section>
-
-            <section className="flex flex-wrap gap-3">
-              <button
-                type="button"
-                className={accentButton}
-                onClick={runScrapedAiPipeline}
-                disabled={isLoading || subject === "All"}
-                title={subject === "All" ? "Select a subject first" : "Scrape documents for the selected subject"}
-              >
-                Scrape Documents
-              </button>
             </section>
 
             <section className="space-y-4">

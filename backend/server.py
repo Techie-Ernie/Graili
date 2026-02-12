@@ -1136,34 +1136,66 @@ def receive_ai_result(payload: AIResultRequest):
             raise HTTPException(status_code=400, detail="Missing client_session_id for uploaded source.")
         insert_fn = insert_question if target_source == "scraped" else insert_uploaded_question
         data = payload.result
+
+        def normalize_marks(value: Any) -> Optional[int]:
+            if value is None or isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return value if value > 0 else None
+            if isinstance(value, float):
+                return int(value) if value.is_integer() and value > 0 else None
+            raw = str(value).strip()
+            if not raw:
+                return None
+            bracket_match = re.fullmatch(r"\[(\d+)\]", raw)
+            if bracket_match:
+                return int(bracket_match.group(1))
+            return int(raw) if raw.isdigit() else None
+
         # parse the exam-style questions 
         print("AI payload keys:", list(data.keys()) if isinstance(data, dict) else type(data))
         print("Context:", context)
         for row in data.get("exam", []):
             print("Exam row:", row)
+            if not isinstance(row, dict):
+                continue
+            chapter = str(row.get("chapter") or "").strip()
+            question_text = str(row.get("question") or "").strip()
+            if not chapter or not question_text:
+                continue
+            marks = normalize_marks(row.get("marks"))
+            question_type = "exam" if marks is not None else "understanding"
+            if question_type == "understanding":
+                print("Exam row has no valid marks; saved as understanding:", question_text[:120])
             data_json = {
                 "subject": context.subject,
                 "category": context.category,
-                "question_type": "exam",
+                "question_type": question_type,
                 "source_link": context.source_link,
                 "document_name": context.document_name,
-                "chapter": row["chapter"],
-                "question_text": row["question"],
-                "marks": row["marks"],
+                "chapter": chapter,
+                "question_text": question_text,
+                "marks": marks,
             }
             if target_source == "uploaded":
                 data_json["session_id"] = client_session_id
             insert_fn(data_json)
         for row in data.get("understanding", []):
             print("Understanding row:", row)
+            if not isinstance(row, dict):
+                continue
+            chapter = str(row.get("chapter") or "").strip()
+            question_text = str(row.get("question") or "").strip()
+            if not chapter or not question_text:
+                continue
             data_json = {
                 "subject": context.subject,
                 "category": context.category,
                 "question_type": "understanding",
                 "source_link": context.source_link,
                 "document_name": context.document_name,
-                "chapter": row["chapter"],
-                "question_text": row["question"],
+                "chapter": chapter,
+                "question_text": question_text,
                 "marks": None,
             }
             if target_source == "uploaded":
