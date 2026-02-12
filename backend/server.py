@@ -193,7 +193,7 @@ def resolve_source_link(document_name: str, config: ScraperConfig) -> str:
     target = document_name.strip()
     for doc in scraper.documents:
         name = (doc.get("document_name") or "").strip()
-        lowered = name.replace(" ", "").lower()
+        lowered = re.sub(r"[^a-z0-9]+", "", name.lower())
         if any(token in lowered for token in ("markscheme", "answerkey", "answersheet", "suggestedanswers", "examinersreport")):
             continue
         if name == target:
@@ -419,7 +419,7 @@ def download_question_papers_for_run(config: ScraperConfig) -> tuple[list[str], 
     def looks_like_answer_key(name: Optional[str]) -> bool:
         if not name:
             return False
-        lowered = str(name).strip().replace(" ", "").lower()
+        lowered = re.sub(r"[^a-z0-9]+", "", str(name).strip().lower())
         tokens = (
             "markscheme",
             "answerkey",

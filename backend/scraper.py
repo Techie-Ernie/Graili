@@ -135,11 +135,11 @@ class HolyGrailScraper:
         os.makedirs(question_dir, exist_ok=True)
 
         answer_key_patterns = [
-            re.compile(r"\bmark\s*scheme\b", flags=re.IGNORECASE),
-            re.compile(r"\banswer\s*key\b", flags=re.IGNORECASE),
-            re.compile(r"\banswer\s*sheet\b", flags=re.IGNORECASE),
-            re.compile(r"\bsuggested\s*answers?\b", flags=re.IGNORECASE),
-            re.compile(r"\bexaminers?\s*report\b", flags=re.IGNORECASE),
+            re.compile(r"\bmark[\W_]*scheme\b", flags=re.IGNORECASE),
+            re.compile(r"\banswer[\W_]*key\b", flags=re.IGNORECASE),
+            re.compile(r"\banswer[\W_]*sheet\b", flags=re.IGNORECASE),
+            re.compile(r"\bsuggested[\W_]*answers?\b", flags=re.IGNORECASE),
+            re.compile(r"\bexaminer(?:[’']s|s)?[\W_]*report\b", flags=re.IGNORECASE),
         ]
 
         def looks_like_answer_key(text: str) -> bool:
