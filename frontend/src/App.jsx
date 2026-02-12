@@ -181,6 +181,7 @@ export default function App() {
   const [subject, setSubject] = useState("All");
   const [subtopics, setSubtopics] = useState([]);
   const [selectedSubtopicCodes, setSelectedSubtopicCodes] = useState([]);
+  const [expandedThemeCodes, setExpandedThemeCodes] = useState([]);
   const [collections, setCollections] = useState([]);
   const [selectedCollectionIds, setSelectedCollectionIds] = useState([]);
   const [newCollectionName, setNewCollectionName] = useState("");
@@ -402,6 +403,11 @@ export default function App() {
 
   const selectedCodeSet = useMemo(() => new Set(selectedSubtopicCodes), [selectedSubtopicCodes]);
 
+  useEffect(() => {
+    const validCodes = new Set(themeGroups.map((group) => group.code));
+    setExpandedThemeCodes((previous) => previous.filter((code) => validCodes.has(code)));
+  }, [themeGroups]);
+
   const toggleCodes = (codes, shouldSelect) => {
     setSelectedSubtopicCodes((previous) => {
       const next = new Set(previous);
@@ -413,6 +419,15 @@ export default function App() {
         }
       });
       return Array.from(next).sort(compareCodes);
+    });
+  };
+
+  const toggleThemeExpanded = (themeCode) => {
+    setExpandedThemeCodes((previous) => {
+      if (previous.includes(themeCode)) {
+        return previous.filter((code) => code !== themeCode);
+      }
+      return [...previous, themeCode];
     });
   };
 
@@ -947,13 +962,15 @@ export default function App() {
             </a>
           </div>
         </div>
-        <div className="grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
-          <aside className="order-2 flex flex-col gap-6 rounded-2xl border border-slate-200 bg-slate-100/80 p-5 shadow-sm lg:order-1 lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)]">
+        <div className="grid gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
+          <aside className="order-2 flex flex-col gap-4 rounded-2xl border border-slate-200 bg-slate-100/80 p-5 shadow-sm lg:order-1 lg:sticky lg:top-4 lg:h-[calc(100vh-1.5rem)]">
             <div className="flex items-center gap-4">
               
               <div>
                 <h1 className="text-2xl font-semibold text-slate-900">Graili</h1>
                 <p className="text-sm text-slate-600">(Holy) Grail Improved</p>
+                <p className="text-sm text-slate-600 font-bold">By Techie Ernie</p>
+
               </div>
             </div>
 
@@ -1049,29 +1066,46 @@ export default function App() {
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-semibold text-slate-800">Chapters</h2>
-                <button
-                  type="button"
-                  onClick={clearSubtopicSelection}
-                  className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
-                >
-                  Clear
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setExpandedThemeCodes(themeGroups.map((group) => group.code))}
+                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                  >
+                    Expand all
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExpandedThemeCodes([])}
+                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                  >
+                    Collapse all
+                  </button>
+                  <button
+                    type="button"
+                    onClick={clearSubtopicSelection}
+                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                  >
+                    Clear
+                  </button>
+                </div>
               </div>
               <p className="text-xs text-slate-500">
                 {selectedSubtopicCodes.length} selected
               </p>
             </div>
 
-            <div className="flex-1 space-y-3 overflow-auto pr-1">
+            <div className="flex-1 space-y-3 overflow-auto pr-1 min-h-[22rem]">
               {themeGroups.map((group) => {
                 const themeCodes = [group.code, ...group.subthemes.map((item) => item.code)];
                 const selectedCount = themeCodes.filter((code) => selectedCodeSet.has(code)).length;
                 const isChecked = themeCodes.length > 0 && selectedCount === themeCodes.length;
                 const isPartial = selectedCount > 0 && selectedCount < themeCodes.length;
+                const isExpanded = expandedThemeCodes.includes(group.code);
 
                 return (
                   <div key={group.code} className="rounded-xl border border-slate-200 bg-white p-3">
-                    <label className="flex items-start gap-2 text-sm font-semibold text-slate-800">
+                    <div className="flex items-start gap-2">
                       <input
                         type="checkbox"
                         checked={isChecked}
@@ -1083,24 +1117,37 @@ export default function App() {
                         onChange={(event) => toggleCodes(themeCodes, event.target.checked)}
                         className="mt-0.5 h-4 w-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
                       />
-                      <span>{group.code} {group.title}</span>
-                    </label>
-
-                    <div className="mt-2 space-y-2 pl-6">
-                      {group.subthemes.map((subtheme) => (
-                        <label
-                          key={subtheme.id ?? subtheme.code}
-                          className="flex items-start gap-2 text-sm text-slate-700"
+                      <div className="min-w-0 flex-1">
+                        <button
+                          type="button"
+                          onClick={() => toggleThemeExpanded(group.code)}
+                          className="flex w-full items-center justify-between text-left text-sm font-semibold text-slate-800"
                         >
-                          <input
-                            type="checkbox"
-                            checked={selectedCodeSet.has(subtheme.code)}
-                            onChange={(event) => toggleCodes([subtheme.code], event.target.checked)}
-                            className="mt-0.5 h-4 w-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
-                          />
-                          <span>{subtheme.code} {subtheme.title}</span>
-                        </label>
-                      ))}
+                          <span className="pr-2">{group.code} {group.title}</span>
+                          <span className="shrink-0 text-xs text-slate-500">
+                            {isExpanded ? "Hide" : "Show"} ({group.subthemes.length})
+                          </span>
+                        </button>
+
+                        {isExpanded && (
+                          <div className="mt-2 space-y-2 pl-2">
+                            {group.subthemes.map((subtheme) => (
+                              <label
+                                key={subtheme.id ?? subtheme.code}
+                                className="flex items-start gap-2 text-sm text-slate-700"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={selectedCodeSet.has(subtheme.code)}
+                                  onChange={(event) => toggleCodes([subtheme.code], event.target.checked)}
+                                  className="mt-0.5 h-4 w-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+                                />
+                                <span>{subtheme.code} {subtheme.title}</span>
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -1447,4 +1494,5 @@ export default function App() {
       )}
     </div>
   );
+
 }
