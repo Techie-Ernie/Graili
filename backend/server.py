@@ -1,11 +1,13 @@
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import pymupdf
 from backend.scraper import HolyGrailScraper
 import glob 
 import asyncio
 import re
+from difflib import SequenceMatcher
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func, or_, select
 from db.engine import engine
@@ -48,6 +50,7 @@ class QuestionContext(BaseModel):
     category: str
     question_type: str
     source_link: str
+    answer_link: Optional[str] = None
     document_name: str
     source_type: Literal["scraped", "uploaded"] = "scraped"
     client_session_id: Optional[str] = None
@@ -88,7 +91,7 @@ _current_context: Optional[QuestionContext] = None
 _scraper_config_lock = Lock()
 _scraper_config = ScraperConfig()
 _document_cache_lock = Lock()
-_document_cache: dict[str, dict[str, Optional[str]]] = {}
+_document_cache: dict[str, dict[str, Any]] = {}
 _document_cache_key: Optional[tuple] = None
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -176,6 +179,235 @@ def derive_scraper_subject(subject: Optional[str]) -> str:
     prefix = (os.environ.get("SCRAPER_SUBJECT_PREFIX", "H2") or "H2").strip().upper()
     return f"{prefix} {base}"
 
+_ANSWER_TITLE_RE = re.compile(
+    r"\b("
+    r"mark(?:ing)?\s*scheme|"
+    r"ms|"
+    r"answer\s*key|"
+    r"answer\s*sheet|"
+    r"suggested\s*answers?|"
+    r"examiner(?:'s|s)?\s*report"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+_TITLE_STOPWORDS = {
+    "the",
+    "for",
+    "and",
+    "with",
+    "from",
+    "h1",
+    "h2",
+    "h3",
+    "a",
+    "levels",
+    "gce",
+}
+
+_SCHOOL_TOKEN_RE = re.compile(r"^[a-z]{2,6}jc$")
+_SCHOOL_ALIASES = {"ri", "mi", "hci", "rvhs", "dhs", "ejc", "njc", "vjc", "nyjc", "cjc", "acjc", "sajc", "asrjc", "yijc", "tjc"}
+_SERIES_TOKEN_RE = re.compile(r"\b(prelims?|preliminary|promotion|promo|examination|exam)\b", flags=re.IGNORECASE)
+
+def _is_answer_key_title(title: str) -> bool:
+    compact = re.sub(r"[^a-z0-9]+", "", (title or "").lower())
+    return bool(
+        _ANSWER_TITLE_RE.search(title or "")
+        or any(
+            token in compact
+            for token in (
+                "markscheme",
+                "answerkey",
+                "answersheet",
+                "suggestedanswers",
+                "examinersreport",
+            )
+        )
+    )
+
+def _normalize_title_for_match(title: str, strip_answer_terms: bool) -> str:
+    cleaned = re.sub(r"\.pdf$", "", str(title or "").strip(), flags=re.IGNORECASE)
+    cleaned = cleaned.replace("&", " and ")
+    if strip_answer_terms:
+        cleaned = _ANSWER_TITLE_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"[^a-z0-9]+", " ", cleaned.lower())
+    return " ".join(token for token in cleaned.split() if token)
+
+def _title_tokens(title: str, strip_answer_terms: bool) -> set[str]:
+    normalized = _normalize_title_for_match(title, strip_answer_terms=strip_answer_terms)
+    tokens: set[str] = set()
+    for token in normalized.split():
+        if token.isdigit():
+            tokens.add(token)
+            continue
+        if len(token) <= 1 or token in _TITLE_STOPWORDS:
+            continue
+        tokens.add(token)
+    return tokens
+
+def _extract_school_tokens(title: str) -> set[str]:
+    tokens = _title_tokens(title, strip_answer_terms=False)
+    schools: set[str] = set()
+    for token in tokens:
+        lowered = token.lower()
+        if _SCHOOL_TOKEN_RE.match(lowered):
+            schools.add(lowered)
+        elif lowered in _SCHOOL_ALIASES:
+            schools.add(lowered)
+    return schools
+
+def _extract_series_tokens(title: str) -> set[str]:
+    return {token.lower() for token in _SERIES_TOKEN_RE.findall(str(title or ""))}
+
+def _strict_match_score(question_title: str, answer_title: str) -> float:
+    question_years = _extract_years(question_title)
+    answer_years = _extract_years(answer_title)
+    if question_years:
+        if not answer_years or question_years.isdisjoint(answer_years):
+            return -1.0
+    elif answer_years:
+        return -1.0
+
+    question_schools = _extract_school_tokens(question_title)
+    answer_schools = _extract_school_tokens(answer_title)
+    if question_schools:
+        if not answer_schools or question_schools.isdisjoint(answer_schools):
+            return -1.0
+    elif answer_schools:
+        return -1.0
+
+    question_markers = _extract_paper_markers(question_title)
+    answer_markers = _extract_paper_markers(answer_title)
+    if question_markers:
+        if not answer_markers or question_markers.isdisjoint(answer_markers):
+            return -1.0
+
+    question_series = _extract_series_tokens(question_title)
+    answer_series = _extract_series_tokens(answer_title)
+    if question_series and answer_series and question_series.isdisjoint(answer_series):
+        return -1.0
+
+    question_tokens = _title_tokens(question_title, strip_answer_terms=False)
+    answer_tokens = _title_tokens(answer_title, strip_answer_terms=True)
+    if not question_tokens or not answer_tokens:
+        return -1.0
+
+    overlap = question_tokens & answer_tokens
+    if len(overlap) < 2:
+        return -1.0
+
+    overlap_score = len(overlap) / max(len(question_tokens), len(answer_tokens))
+    sequence_score = SequenceMatcher(
+        None,
+        _normalize_title_for_match(question_title, strip_answer_terms=False),
+        _normalize_title_for_match(answer_title, strip_answer_terms=True),
+    ).ratio()
+    score = (0.6 * overlap_score) + (0.4 * sequence_score)
+
+    if question_markers and answer_markers:
+        score += 0.05
+    if question_schools and answer_schools:
+        score += 0.05
+    return score
+
+def _extract_years(title: str) -> set[str]:
+    return set(re.findall(r"\b(20\d{2})\b", str(title or "")))
+
+def _extract_paper_markers(title: str) -> set[str]:
+    lowered = str(title or "").lower()
+    markers = {f"p{value}" for value in re.findall(r"\b(?:paper|p)\s*([12])\b", lowered)}
+    markers.update(f"csq{value}" for value in re.findall(r"\bcsq\s*([12])\b", lowered))
+    return markers
+
+def _title_match_score(question_title: str, answer_title: str) -> float:
+    return _strict_match_score(question_title, answer_title)
+
+def _build_answer_link_map(documents: list[dict]) -> dict[str, Optional[str]]:
+    docs: list[dict[str, str]] = []
+    for doc in documents or []:
+        name = str((doc or {}).get("document_name") or "").strip()
+        source_link = str((doc or {}).get("source_link") or "").strip()
+        if not name:
+            continue
+        docs.append({"name": name, "source_link": source_link})
+
+    question_docs = [doc for doc in docs if not _is_answer_key_title(doc["name"])]
+    answer_docs = [doc for doc in docs if _is_answer_key_title(doc["name"]) and doc["source_link"]]
+    if not question_docs or not answer_docs:
+        return {}
+
+    answer_link_by_question: dict[str, Optional[str]] = {}
+    for question_doc in question_docs:
+        scored: list[tuple[float, Optional[str]]] = []
+        for answer_doc in answer_docs:
+            score = _title_match_score(question_doc["name"], answer_doc["name"])
+            scored.append((score, answer_doc["source_link"] or None))
+        scored = sorted(scored, key=lambda row: row[0], reverse=True)
+        if not scored:
+            continue
+        best_score, best_link = scored[0]
+        if not best_link or best_score < 0.50:
+            continue
+        # If question title lacks paper marker (P1/P2/CSQ), require a clear winner.
+        question_markers = _extract_paper_markers(question_doc["name"])
+        if not question_markers and len(scored) > 1:
+            second_score = scored[1][0]
+            if second_score >= 0.50 and (best_score - second_score) < 0.08:
+                continue
+        answer_link_by_question[question_doc["name"]] = best_link
+    return answer_link_by_question
+
+def _candidate_subject_dirs(subject: str) -> list[Path]:
+    requested = safe_subject_name(subject)
+    all_dirs = [path for path in DOCUMENTS_ROOT.iterdir() if path.is_dir()] if DOCUMENTS_ROOT.exists() else []
+    if not all_dirs:
+        return []
+    exact = [path for path in all_dirs if path.name == requested]
+    if exact:
+        return exact
+
+    requested_base = requested.split("__", 1)[0]
+    base_matches = [path for path in all_dirs if path.name.split("__", 1)[0] == requested_base]
+    if base_matches:
+        return base_matches
+    return all_dirs
+
+def _find_best_answer_key_path(subject: str, question_document_name: str) -> Optional[Path]:
+    candidates: list[Path] = []
+    for subject_dir in _candidate_subject_dirs(subject):
+        answer_key_dir = subject_dir / "answer_key"
+        question_paper_dir = subject_dir / "question_paper"
+        question_papers_dir = subject_dir / "question_papers"
+
+        if answer_key_dir.exists():
+            candidates.extend(answer_key_dir.glob("*.pdf"))
+        # Some answer docs can be misclassified into question_paper; include obvious answer-like titles.
+        for folder in (question_paper_dir, question_papers_dir):
+            if not folder.exists():
+                continue
+            for candidate in folder.glob("*.pdf"):
+                if _is_answer_key_title(candidate.stem):
+                    candidates.append(candidate)
+    if not candidates:
+        return None
+
+    scored_candidates: list[tuple[float, Path]] = []
+    for candidate in candidates:
+        score = _title_match_score(question_document_name, candidate.stem)
+        scored_candidates.append((score, candidate))
+    scored_candidates.sort(key=lambda row: row[0], reverse=True)
+    if not scored_candidates:
+        return None
+    best_score, best_path = scored_candidates[0]
+    if best_score < 0.50:
+        return None
+
+    question_markers = _extract_paper_markers(question_document_name)
+    if not question_markers and len(scored_candidates) > 1:
+        second_score = scored_candidates[1][0]
+        if second_score >= 0.50 and (best_score - second_score) < 0.08:
+            return None
+
+    return best_path
 
 
 def resolve_source_link(document_name: str, config: ScraperConfig) -> str:
@@ -209,7 +441,8 @@ def _cache_key_for_config(config: ScraperConfig) -> tuple:
 
 def _update_document_cache(documents: list[dict], config: ScraperConfig) -> None:
     cache_key = _cache_key_for_config(config)
-    mapping: dict[str, dict[str, Optional[str]]] = {}
+    mapping: dict[str, dict[str, Any]] = {}
+    answer_link_map = _build_answer_link_map(documents)
     for doc in documents or []:
         name = (doc.get("document_name") or "").strip()
         if not name:
@@ -217,13 +450,14 @@ def _update_document_cache(documents: list[dict], config: ScraperConfig) -> None
         mapping[name] = {
             "source_link": doc.get("source_link"),
             "year": doc.get("year"),
+            "answer_link": answer_link_map.get(name),
         }
     with _document_cache_lock:
         global _document_cache_key, _document_cache
         _document_cache_key = cache_key
         _document_cache = mapping
 
-def _get_document_cache(config: ScraperConfig) -> dict[str, dict[str, Optional[str]]]:
+def _get_document_cache(config: ScraperConfig) -> dict[str, dict[str, Any]]:
     cache_key = _cache_key_for_config(config)
     with _document_cache_lock:
         if _document_cache_key == cache_key and _document_cache:
@@ -235,7 +469,7 @@ def _is_document_cache_current(config: ScraperConfig) -> bool:
     with _document_cache_lock:
         return _document_cache_key == cache_key and bool(_document_cache)
 
-def get_or_create_document_cache(config: ScraperConfig) -> dict[str, dict[str, Optional[str]]]:
+def get_or_create_document_cache(config: ScraperConfig) -> dict[str, dict[str, Any]]:
     cache = _get_document_cache(config)
     if cache:
         return cache
@@ -380,6 +614,28 @@ def ensure_question_papers(config: ScraperConfig) -> list[str]:
             subject_label=subject_label,
         )
     return find_question_papers(subject_label)
+
+def _backfill_scraped_answer_links(subject: str, document_cache: dict[str, dict[str, Any]]) -> int:
+    normalized_subject = normalize_subject_label(subject)
+    updates = 0
+    with Session(engine) as session:
+        for document_name, cached in (document_cache or {}).items():
+            answer_link = str((cached or {}).get("answer_link") or "").strip()
+            if not answer_link:
+                continue
+            updated = (
+                session.query(Question)
+                .filter(
+                    Question.subject == normalized_subject,
+                    Question.document_name == document_name,
+                    or_(Question.answer_link.is_(None), Question.answer_link != answer_link),
+                )
+                .update({Question.answer_link: answer_link}, synchronize_session=False)
+            )
+            updates += int(updated or 0)
+        if updates:
+            session.commit()
+    return updates
 
 
 def _upsert_question(model: type[Question] | type[UploadedQuestion], data: dict) -> None:
@@ -611,6 +867,17 @@ def refresh_context_from_scraper() -> QuestionContext:
 def test_connection():
     return {"status": "connected", "message": "FastAPI backend is running!"}
 
+@app.get("/answer-key")
+def get_answer_key_document(subject: str, document_name: str):
+    best_match = _find_best_answer_key_path(subject, document_name)
+    if best_match is None or not best_match.exists():
+        raise HTTPException(status_code=404, detail="No matching answer key found.")
+    return FileResponse(
+        path=str(best_match),
+        media_type="application/pdf",
+        filename=best_match.name,
+    )
+
 @app.get("/data")
 def get_data():
     with _scraper_config_lock:
@@ -622,6 +889,7 @@ def get_data():
             raise HTTPException(status_code=404, detail="No question papers found for this subject.")
 
         document_cache = _get_document_cache(config)
+        _backfill_scraped_answer_links(config.subject_label or config.subject, document_cache)
         syllabus_text = load_syllabus_text(config.subject_label or config.subject)
 
         def build_document_payload(file_path: str) -> dict:
@@ -629,6 +897,7 @@ def get_data():
             document_name = Path(file_path).stem
             cached = document_cache.get(document_name, {})
             source_link = cached.get("source_link") or ""
+            answer_link = cached.get("answer_link") or ""
             cached_year = cached.get("year")
             if cached_year is not None:
                 try:
@@ -641,6 +910,7 @@ def get_data():
                 category=config.category,
                 question_type="exam",
                 source_link=source_link,
+                answer_link=answer_link,
                 document_name=document_name,
                 source_type="scraped",
             )
@@ -799,6 +1069,7 @@ def get_questions(
     source_type: Optional[str] = None,
 ):
     client_session_id = get_client_session_id(request)
+    grail_links_cache: dict[tuple[str, str], dict[str, dict[str, Optional[str]]]] = {}
 
     def normalize_filter(value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -847,6 +1118,105 @@ def get_questions(
     search_terms: list[str] = []
     if search:
         search_terms = [term for term in re.split(r"\s+", search.strip()) if term]
+
+    def sanitize_http_link(value: Optional[str]) -> Optional[str]:
+        cleaned = str(value or "").strip()
+        if cleaned.startswith("https://") or cleaned.startswith("http://"):
+            return cleaned
+        return None
+
+    def normalize_doc_lookup_key(value: str) -> str:
+        stripped = re.sub(r"\.pdf$", "", str(value or "").strip(), flags=re.IGNORECASE)
+        return re.sub(r"[^a-z0-9]+", "", stripped.lower())
+
+    def get_grail_links_for_subject(row_subject: str, row_category: Optional[str]) -> dict[str, dict[str, Optional[str]]]:
+        normalized_subject = normalize_subject_label(row_subject)
+        normalized_category = normalize_category(row_category) or "GCE 'A' Levels"
+        cache_key = (normalized_subject, normalized_category)
+        if cache_key in grail_links_cache:
+            return grail_links_cache[cache_key]
+
+        try:
+            pages = int(os.environ.get("ANSWER_LINK_SCRAPER_PAGES", "20"))
+        except ValueError:
+            pages = 20
+        pages = max(1, min(20, pages))
+
+        config = ScraperConfig(
+            category=normalized_category,
+            subject=normalized_subject,
+            year=None,
+            document_type="Exam Papers",
+            pages=pages,
+            subject_label=normalized_subject,
+        )
+        cache = get_or_create_document_cache(config)
+        links_by_document: dict[str, dict[str, Optional[str]]] = {}
+        for doc_name, meta in cache.items():
+            links_by_document[doc_name] = {
+                "source_link": sanitize_http_link(meta.get("source_link")),  # type: ignore[arg-type]
+                "answer_link": sanitize_http_link(meta.get("answer_link")),  # type: ignore[arg-type]
+            }
+        grail_links_cache[cache_key] = links_by_document
+        return links_by_document
+
+    def find_document_meta(
+        document_name: str,
+        links_by_document: dict[str, dict[str, Optional[str]]],
+    ) -> Optional[dict[str, Optional[str]]]:
+        target = str(document_name or "").strip()
+        if not target or not links_by_document:
+            return None
+
+        # Fast paths: exact/case-insensitive/exension-insensitive matches.
+        if target in links_by_document:
+            return links_by_document[target]
+
+        target_lower = target.lower()
+        target_no_ext_lower = re.sub(r"\.pdf$", "", target_lower, flags=re.IGNORECASE)
+        for key, meta in links_by_document.items():
+            key_lower = key.lower()
+            key_no_ext_lower = re.sub(r"\.pdf$", "", key_lower, flags=re.IGNORECASE)
+            if (
+                key_lower == target_lower
+                or key_no_ext_lower == target_no_ext_lower
+                or key_lower == f"{target_no_ext_lower}.pdf"
+            ):
+                return meta
+
+        # Normalized exact match (drops punctuation/spacing differences).
+        target_norm_key = normalize_doc_lookup_key(target)
+        normalized_matches = [
+            meta
+            for key, meta in links_by_document.items()
+            if normalize_doc_lookup_key(key) == target_norm_key
+        ]
+        if len(normalized_matches) == 1:
+            return normalized_matches[0]
+
+        # Conservative fuzzy fallback: only return when clearly better than alternatives.
+        target_norm = _normalize_title_for_match(target, strip_answer_terms=False)
+        if not target_norm:
+            return None
+        scored: list[tuple[float, dict[str, Optional[str]]]] = []
+        for key, meta in links_by_document.items():
+            key_norm = _normalize_title_for_match(key, strip_answer_terms=False)
+            if not key_norm:
+                continue
+            score = SequenceMatcher(None, target_norm, key_norm).ratio()
+            if target_norm in key_norm or key_norm in target_norm:
+                score += 0.08
+            scored.append((score, meta))
+        scored.sort(key=lambda row: row[0], reverse=True)
+        if not scored:
+            return None
+        best_score, best_meta = scored[0]
+        second_score = scored[1][0] if len(scored) > 1 else 0.0
+        if best_score < 0.88:
+            return None
+        if second_score >= 0.88 and (best_score - second_score) < 0.03:
+            return None
+        return best_meta
 
     def query_question_rows(
         session: Session,
@@ -937,6 +1307,38 @@ def get_questions(
                 if collection_name and collection_name not in collection_names_by_doc[key]:
                     collection_names_by_doc[key].append(collection_name)
 
+        def resolve_source_link_for_row(row: Any) -> Optional[str]:
+            persisted = sanitize_http_link(getattr(row, "source_link", None))
+            if persisted:
+                return persisted
+            if source_tag != "scraped":
+                return None
+            row_subject = (row.subject or "").strip()
+            row_category = (row.category or "").strip()
+            row_document_name = (row.document_name or "").strip()
+            if not row_subject or not row_document_name:
+                return None
+            links_by_document = get_grail_links_for_subject(row_subject, row_category)
+            matched_meta = find_document_meta(row_document_name, links_by_document)
+            resolved = (matched_meta or {}).get("source_link")
+            return sanitize_http_link(resolved)
+
+        def resolve_answer_link_for_row(row: Any) -> Optional[str]:
+            persisted = sanitize_http_link(getattr(row, "answer_link", None))
+            if persisted:
+                return persisted
+            if source_tag != "scraped":
+                return None
+            row_subject = (row.subject or "").strip()
+            row_category = (row.category or "").strip()
+            row_document_name = (row.document_name or "").strip()
+            if not row_subject or not row_document_name:
+                return None
+            links_by_document = get_grail_links_for_subject(row_subject, row_category)
+            matched_meta = find_document_meta(row_document_name, links_by_document)
+            resolved = (matched_meta or {}).get("answer_link")
+            return sanitize_http_link(resolved)
+
         return [
             {
                 "id": q.id,
@@ -946,7 +1348,8 @@ def get_questions(
                 "chapter": q.chapter,
                 "question_text": q.question_text,
                 "marks": q.marks,
-                "source_link": q.source_link,
+                "source_link": resolve_source_link_for_row(q),
+                "answer_link": resolve_answer_link_for_row(q),
                 "document_name": q.document_name,
                 "source_type": source_tag,
                 "collections": sorted(
@@ -1085,6 +1488,7 @@ def receive_ai_result(payload: AIResultRequest):
                 "category": context.category,
                 "question_type": question_type,
                 "source_link": context.source_link,
+                "answer_link": context.answer_link,
                 "document_name": context.document_name,
                 "chapter": chapter,
                 "question_text": question_text,
@@ -1106,6 +1510,7 @@ def receive_ai_result(payload: AIResultRequest):
                 "category": context.category,
                 "question_type": "understanding",
                 "source_link": context.source_link,
+                "answer_link": context.answer_link,
                 "document_name": context.document_name,
                 "chapter": chapter,
                 "question_text": question_text,

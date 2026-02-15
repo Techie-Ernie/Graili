@@ -899,8 +899,23 @@ export default function App() {
               {sourceLabel === "scraped" ? "Scraped source" : "User upload"}
             </span>
             {question.source_link && (
-              <a className="rounded-full bg-amber-100 px-2 py-1" href={question.source_link}>
+              <a
+                className="rounded-full bg-amber-100 px-2 py-1"
+                href={question.source_link}
+                target="_blank"
+                rel="noreferrer"
+              >
                 Source 🔗
+              </a>
+            )}
+            {question.answer_link && (
+              <a
+                className="rounded-full bg-emerald-100 px-2 py-1 font-semibold text-emerald-900 hover:bg-emerald-200"
+                href={question.answer_link}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Mark Scheme
               </a>
             )}
             {Array.isArray(question.collections) && question.collections.length > 0 ? (
@@ -969,7 +984,7 @@ export default function App() {
               <div>
                 <h1 className="text-2xl font-semibold text-slate-900">Graili</h1>
                 <p className="text-sm text-slate-600">(Holy) Grail Improved</p>
-                  <p className="text-sm text-slate-600 font-bold">By Techie Ernie</p>
+                  <p className="text-sm text-slate-600 font-bold">By <a href='https://techie-ernie.github.io'> Techie Ernie </a> </p>
 
               </div>
             </div>
