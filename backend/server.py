@@ -16,8 +16,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Literal
 from threading import Lock
 import os
-import shutil
-from uuid import uuid4
 
 app = FastAPI()
 
@@ -384,87 +382,6 @@ def ensure_question_papers(config: ScraperConfig) -> list[str]:
     return find_question_papers(subject_label)
 
 
-def download_question_papers_for_run(config: ScraperConfig) -> tuple[list[str], Path]:
-    # Reject scraping without an explicit subject selection.
-    selected_subject = (config.subject_label or config.subject or "").strip()
-    if not selected_subject or selected_subject.lower() in {"all", "any"}:
-        raise HTTPException(status_code=400, detail="Select a subject before scraping documents.")
-
-    subject_label = normalize_subject_label(config.subject_label or config.subject)
-    scraper_subject = derive_scraper_subject(config.subject)
-    scraper = HolyGrailScraper(
-        config.category,
-        scraper_subject,
-        config.year,
-        config.document_type,
-        pages=config.pages,
-    )
-
-    try:
-        documents = asyncio.run(scraper.get_documents())
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        try:
-            documents = loop.run_until_complete(scraper.get_documents())
-        finally:
-            loop.close()
-    except Exception as exc:
-        error_message = f"{type(exc).__name__}: {exc}"
-        print("Scraper fetch error:", error_message)
-        raise HTTPException(status_code=500, detail=f"Scraper fetch failed: {error_message}") from exc
-
-    if not documents:
-        return [], TMP_DIR / "scraped_docs" / "empty"
-
-    def looks_like_answer_key(name: Optional[str]) -> bool:
-        if not name:
-            return False
-        lowered = re.sub(r"[^a-z0-9]+", "", str(name).strip().lower())
-        tokens = (
-            "markscheme",
-            "answerkey",
-            "answersheet",
-            "suggestedanswers",
-            "examinersreport",
-        )
-        return any(token in lowered for token in tokens)
-
-    question_documents = {link: name for link, name in documents.items() if not looks_like_answer_key(name)}
-    if not question_documents:
-        raise HTTPException(
-            status_code=404,
-            detail="No question papers found (results look like answer keys/mark schemes). Try increasing pages or adjusting filters.",
-        )
-
-    _update_document_cache(scraper.documents, config)
-
-    run_root = TMP_DIR / "scraped_docs" / uuid4().hex
-    run_root.mkdir(parents=True, exist_ok=True)
-    try:
-        scraper.download_documents(
-            question_documents,
-            download_root=str(run_root),
-            subject_label=subject_label,
-        )
-    except Exception as exc:
-        error_message = f"{type(exc).__name__}: {exc}"
-        print("Scraper download error:", error_message)
-        raise HTTPException(status_code=500, detail=f"Scraper download failed: {error_message}") from exc
-    files = find_question_papers(subject_label, run_root)
-    if not files:
-        # Provide a more actionable error when classification drops everything into answer_key.
-        subject_dir = safe_subject_name(subject_label)
-        any_pdfs = list((run_root / subject_dir).rglob("*.pdf"))
-        if any_pdfs:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    f"Downloaded {len(any_pdfs)} PDF(s) but none were classified as question papers. "
-                    "They may have been detected as answer keys/mark schemes."
-                ),
-            )
-    return files, run_root
-
 def _upsert_question(model: type[Question] | type[UploadedQuestion], data: dict) -> None:
     if "subject" in data and data.get("subject"):
         data["subject"] = normalize_subject_label(data.get("subject"))
@@ -698,10 +615,9 @@ def test_connection():
 def get_data():
     with _scraper_config_lock:
         config = _scraper_config
-    files: list[str] = []
-    run_root: Optional[Path] = None
     try:
-        files, run_root = download_question_papers_for_run(config)
+        # Persist scraped files under DOCUMENTS_ROOT so they are reusable across requests/users.
+        files = ensure_question_papers(config)
         if not files:
             raise HTTPException(status_code=404, detail="No question papers found for this subject.")
 
@@ -744,9 +660,6 @@ def get_data():
         error_message = f"{type(exc).__name__}: {exc}"
         print("Data pipeline error:", error_message)
         raise HTTPException(status_code=500, detail=f"Data extraction failed: {error_message}") from exc
-    finally:
-        if run_root and run_root.exists():
-            shutil.rmtree(run_root, ignore_errors=True)
 
 
 @app.post("/uploads/question-documents/extract")

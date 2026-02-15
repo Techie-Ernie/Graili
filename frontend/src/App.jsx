@@ -969,7 +969,7 @@ export default function App() {
               <div>
                 <h1 className="text-2xl font-semibold text-slate-900">Graili</h1>
                 <p className="text-sm text-slate-600">(Holy) Grail Improved</p>
-                <p className="text-sm text-slate-600 font-bold">By Techie Ernie</p>
+                  <p className="text-sm text-slate-600 font-bold">By Techie Ernie</p>
 
               </div>
             </div>
